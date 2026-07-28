@@ -181,6 +181,9 @@ def main():
         print("刷新失败，但原有数据已保留，不影响继续使用。")
         if existing:
             print(f"当前仍可使用本地数据: {existing[0]['Date']} ~ {existing[-1]['Date']} 共 {len(existing)} 期")
+            print("已有本地数据可用，本次自动任务按保留旧数据处理。")
+            log(f"刷新失败但保留旧数据继续: {exc}")
+            return
         print(f"失败原因: {exc}")
         print(f"日志位置: {os.path.join(LOG_DIR, 'fetch_data.log')}")
         log(f"刷新失败: {exc}")
