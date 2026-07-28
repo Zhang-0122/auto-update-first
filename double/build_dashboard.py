@@ -222,7 +222,14 @@ def main() -> None:
     )
     latest_balls = "".join(f'<span class="red-ball">{value}</span>' for value in latest["Red"].split(","))
     latest_blue = f'<span class="blue-ball">{latest["Blue"]}</span>'
-    update_hint = "本页面已同步到最新官方开奖日期；若官方未更新，则不会重复刷新。"
+    official_source = "中国福彩网 / 中彩网公开开奖信息"
+    sync_status = f"已同步到 {latest['Date']} 第 {latest['Issue']} 期"
+    update_hint = "后台会先核对官方最新开奖日期；只有官方日期或号码变化时才更新页面。"
+    disclaimer = (
+        "本页面基于中国福彩网/中彩网等公开开奖信息整理，仅用于开奖记录查询、历史统计和中奖核验参考。"
+        "彩票开奖结果具有随机性，历史统计不代表未来开奖结果，也不构成购彩建议。"
+        "中奖结果、奖级和兑奖规则以官方公告及销售机构规定为准。请理性参与，未成年人不得购买彩票。"
+    )
     table_rows = "\n".join(
         f"""
         <tr>
@@ -290,7 +297,7 @@ def main() -> None:
     .latest-row {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
     .status-card {{
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 10px;
       margin: 0 0 16px;
     }}
@@ -303,6 +310,22 @@ def main() -> None:
     .status-label {{ color: var(--muted); font-size: 12px; margin-bottom: 5px; }}
     .status-value {{ font-weight: 800; }}
     .status-help {{ color: var(--muted); font-size: 13px; line-height: 1.6; }}
+    .sync-ok {{
+      color: #136f3a;
+      background: #e9f8ef;
+      border: 1px solid #bfe8cd;
+      border-radius: 999px;
+      display: inline-block;
+      padding: 3px 9px;
+      font-size: 13px;
+      font-weight: 800;
+      margin-top: 6px;
+    }}
+    .disclaimer {{
+      border-left: 4px solid var(--orange-1);
+      background: #fffaf5;
+      line-height: 1.8;
+    }}
     .red-ball, .blue-ball {{
       display: inline-flex;
       width: 30px;
@@ -550,17 +573,22 @@ def main() -> None:
       <aside class="latest">
         <div class="latest-title">最新开奖 {html.escape(latest["Issue"])}期 · {html.escape(latest["Date"])}</div>
         <div class="latest-row">{latest_balls}{latest_blue}</div>
+        <div class="sync-ok">{html.escape(sync_status)}</div>
       </aside>
     </header>
 
     <section class="status-card" aria-label="数据状态">
       <div class="status-item">
-        <div class="status-label">最新期号</div>
-        <div class="status-value">{html.escape(latest["Issue"])}期 · {html.escape(latest["Date"])}</div>
+        <div class="status-label">同步状态</div>
+        <div class="status-value">{html.escape(sync_status)}</div>
       </div>
       <div class="status-item">
         <div class="status-label">页面更新时间</div>
         <div class="status-value">{html.escape(data_modified)}</div>
+      </div>
+      <div class="status-item">
+        <div class="status-label">官方来源</div>
+        <div class="status-help">{html.escape(official_source)}</div>
       </div>
       <div class="status-item">
         <div class="status-label">同步说明</div>
@@ -660,6 +688,11 @@ def main() -> None:
         <h2>使用建议</h2>
         <p class="note">选号参考只用于整理历史分布：可关注红球三区均衡、奇偶接近 3:3 或 4:2，和值尽量落在历史密集区间。彩票是随机事件，请理性参与。</p>
       </div>
+    </section>
+
+    <section class="panel disclaimer" aria-label="免责声明">
+      <h2>数据来源与免责声明</h2>
+      <p class="note">{html.escape(disclaimer)}</p>
     </section>
   </main>
 
