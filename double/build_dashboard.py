@@ -222,7 +222,7 @@ def main() -> None:
     )
     latest_balls = "".join(f'<span class="red-ball">{value}</span>' for value in latest["Red"].split(","))
     latest_blue = f'<span class="blue-ball">{latest["Blue"]}</span>'
-    update_hint = "普通用户直接双击 ssq_analyzer.html 查看；维护者刷新数据后重新生成网页即可。"
+    update_hint = "本页面已同步到最新官方开奖日期；若官方未更新，则不会重复刷新。"
     table_rows = "\n".join(
         f"""
         <tr>
@@ -559,11 +559,11 @@ def main() -> None:
         <div class="status-value">{html.escape(latest["Issue"])}期 · {html.escape(latest["Date"])}</div>
       </div>
       <div class="status-item">
-        <div class="status-label">数据更新时间</div>
+        <div class="status-label">页面更新时间</div>
         <div class="status-value">{html.escape(data_modified)}</div>
       </div>
       <div class="status-item">
-        <div class="status-label">刷新说明</div>
+        <div class="status-label">同步说明</div>
         <div class="status-help">{html.escape(update_hint)}</div>
       </div>
     </section>
