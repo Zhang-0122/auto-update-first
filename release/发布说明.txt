@@ -1,0 +1,11 @@
+﻿双色球开奖查询与统计参考 - 发布版
+
+给别人使用：
+1. 如果已经部署到线上，直接把网址发给对方。
+2. 如果还没部署，可以先把本目录里的 index.html 上传到任意静态网站托管平台。
+3. 对方只需要浏览器，不需要 Python，不需要安装依赖。
+
+维护者更新数据：
+1. 在 double 目录运行：python run_app.py --update
+2. 把生成后的 ssq_analyzer.html 复制为 release\index.html
+3. 重新上传/同步 release 目录。
