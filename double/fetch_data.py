@@ -8,11 +8,56 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 import requests, json, re, os, shutil, time
 from datetime import datetime
 
+from lottery_sources import (
+    fetch_cwl_digit_history,
+    fetch_dlt_history,
+    fetch_qlc_history,
+    fetch_sporttery_digit_history,
+    load_json_records,
+    save_json_records,
+    validate_digit_record,
+    validate_dlt_record,
+    validate_qlc_record,
+)
+
 DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(DIR)
 CACHE_DIR = os.path.join(PROJECT_ROOT, "cashe")
 LOG_DIR = os.path.join(CACHE_DIR, "logs")
 OUT = os.path.join(DIR, "ssq_data.json")
+DLT_OUT = os.path.join(DIR, "dlt_data.json")
+EXTRA_LOTTERIES = {
+    "fc3d": {
+        "label": "福彩3D",
+        "out": os.path.join(DIR, "fc3d_data.json"),
+        "fetch": lambda: fetch_cwl_digit_history("3d", 3, issue_count=10000),
+        "validate": lambda record: validate_digit_record(record, 3),
+    },
+    "pl3": {
+        "label": "排列3",
+        "out": os.path.join(DIR, "pl3_data.json"),
+        "fetch": lambda: fetch_sporttery_digit_history("35", 3, max_pages=100),
+        "validate": lambda record: validate_digit_record(record, 3),
+    },
+    "pl5": {
+        "label": "排列5",
+        "out": os.path.join(DIR, "pl5_data.json"),
+        "fetch": lambda: fetch_sporttery_digit_history("350133", 5, max_pages=100),
+        "validate": lambda record: validate_digit_record(record, 5),
+    },
+    "qxc": {
+        "label": "七星彩",
+        "out": os.path.join(DIR, "qxc_data.json"),
+        "fetch": lambda: fetch_sporttery_digit_history("04", 7, max_pages=100),
+        "validate": lambda record: validate_digit_record(record, 7),
+    },
+    "qlc": {
+        "label": "七乐彩",
+        "out": os.path.join(DIR, "qlc_data.json"),
+        "fetch": lambda: fetch_qlc_history(issue_count=10000),
+        "validate": validate_qlc_record,
+    },
+}
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 TIMEOUT = 20
 
@@ -138,6 +183,72 @@ def save_records(records):
         json.dump(valid, f, ensure_ascii=False)
     return valid
 
+
+def sync_dlt():
+    print("[DLT] sporttery.cn ...", end=" ")
+    try:
+        fetched = fetch_dlt_history()
+        valid = [record for record in fetched if validate_dlt_record(record)]
+        if not valid:
+            raise RuntimeError("大乐透官方接口没有返回有效记录")
+        existing = load_json_records(DLT_OUT)
+        if existing:
+            current_latest = sorted(existing, key=lambda item: item["Date"])[-1]
+            fetched_latest = sorted(valid, key=lambda item: item["Date"])[-1]
+            if current_latest == fetched_latest and len(existing) == len(valid):
+                print(f"无需同步，当前已到 {current_latest['Date']} 第 {current_latest['Issue']} 期")
+                log(f"大乐透无需同步: {current_latest['Date']} 第 {current_latest['Issue']} 期")
+                return existing
+        saved = save_json_records(DLT_OUT, valid, "大乐透")
+        latest = saved[-1]
+        print(f"OK {len(saved)} records，已到 {latest['Date']} 第 {latest['Issue']} 期")
+        log(f"大乐透刷新成功: {saved[0]['Date']} ~ {latest['Date']} 共 {len(saved)} 期")
+        return saved
+    except Exception as exc:
+        existing = load_json_records(DLT_OUT)
+        print(f"FAIL {exc}")
+        if existing:
+            latest = sorted(existing, key=lambda item: item["Date"])[-1]
+            print(f"  大乐透保留旧数据: {latest['Date']} 第 {latest['Issue']} 期，共 {len(existing)} 期")
+            log(f"大乐透刷新失败但保留旧数据: {exc}")
+            return existing
+        log(f"大乐透刷新失败且无旧数据: {exc}")
+        return []
+
+
+def sync_extra_lottery(key, info):
+    label = info["label"]
+    out = info["out"]
+    print(f"[{key.upper()}] {label} ...", end=" ")
+    try:
+        fetched = info["fetch"]()
+        valid = [record for record in fetched if info["validate"](record)]
+        if not valid:
+            raise RuntimeError(f"{label} 官方接口没有返回有效记录")
+        existing = load_json_records(out)
+        if existing:
+            current_latest = sorted(existing, key=lambda item: item["Date"])[-1]
+            fetched_latest = sorted(valid, key=lambda item: item["Date"])[-1]
+            if current_latest == fetched_latest and len(existing) == len(valid):
+                print(f"无需同步，当前已到 {current_latest['Date']} 第 {current_latest['Issue']} 期")
+                log(f"{label}无需同步: {current_latest['Date']} 第 {current_latest['Issue']} 期")
+                return existing
+        saved = save_json_records(out, valid, label)
+        latest = saved[-1]
+        print(f"OK {len(saved)} records，已到 {latest['Date']} 第 {latest['Issue']} 期")
+        log(f"{label}刷新成功: {saved[0]['Date']} ~ {latest['Date']} 共 {len(saved)} 期")
+        return saved
+    except Exception as exc:
+        existing = load_json_records(out)
+        print(f"FAIL {exc}")
+        if existing:
+            latest = sorted(existing, key=lambda item: item["Date"])[-1]
+            print(f"  {label}保留旧数据: {latest['Date']} 第 {latest['Issue']} 期，共 {len(existing)} 期")
+            log(f"{label}刷新失败但保留旧数据: {exc}")
+            return existing
+        log(f"{label}刷新失败且无旧数据: {exc}")
+        return []
+
 def main():
     t0 = time.time()
     print("=" * 50)
@@ -188,6 +299,10 @@ def main():
         print(f"日志位置: {os.path.join(LOG_DIR, 'fetch_data.log')}")
         log(f"刷新失败: {exc}")
         raise SystemExit(1)
+    finally:
+        sync_dlt()
+        for key, info in EXTRA_LOTTERIES.items():
+            sync_extra_lottery(key, info)
 
 if __name__ == "__main__":
     main()

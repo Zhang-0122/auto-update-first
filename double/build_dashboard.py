@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Build a self-contained双色球 dashboard.
-
-The output HTML embeds its data, charts, and interactions so users can open it
-by double-clicking. No CDN, server, or browser file-fetch permission is needed.
-"""
+"""Build a self-contained public lottery dashboard."""
 
 from __future__ import annotations
 
@@ -13,886 +9,689 @@ import json
 import os
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from statistics import mean
 
-
-ROOT = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(ROOT, "ssq_data.json")
-OUT_FILE = os.path.join(ROOT, "ssq_analyzer.html")
+from lottery_config import DISCLAIMER, LOTTERIES, LotteryConfig
 
 
-def load_records() -> list[dict[str, str]]:
-    with open(DATA_FILE, "r", encoding="utf-8-sig") as file:
-        records = json.load(file)
-    records.sort(key=lambda item: item["Date"])
-    return records
+ROOT = Path(__file__).resolve().parent
+OUT_FILE = ROOT / "ssq_analyzer.html"
 
 
-def red_numbers(record: dict[str, str]) -> list[int]:
-    return [int(value) for value in record["Red"].split(",")]
+def number(value: int | str) -> str:
+    return f"{int(value):02d}"
 
 
-def number(value: int) -> str:
-    return f"{value:02d}"
+def split_numbers(value: str) -> list[int]:
+    return [int(item) for item in str(value).replace("，", ",").split(",") if item.strip()]
 
 
-def build_bar_rows(items: list[dict[str, object]], max_count: int, theme: str) -> str:
+def load_records(config: LotteryConfig) -> list[dict[str, str]]:
+    data_file = ROOT / config.data_file
+    if not data_file.exists():
+        return []
+    with data_file.open("r", encoding="utf-8-sig") as file:
+        data = json.load(file)
+    records = data if isinstance(data, list) else []
+    return sorted(records, key=lambda item: (item.get("Date", ""), item.get("Issue", "")))
+
+
+def record_groups(lottery_id: str, record: dict[str, str]) -> list[list[int]]:
+    if lottery_id == "ssq":
+        return [split_numbers(record["Red"]), [int(record["Blue"])]]
+    if lottery_id == "dlt":
+        return [split_numbers(record["Front"]), split_numbers(record["Back"])]
+    if lottery_id in {"fc3d", "pl3", "pl5", "qxc"}:
+        return [split_numbers(record["Digit"])]
+    if lottery_id == "qlc":
+        return [split_numbers(record["Main"]), [int(record["Special"])]]
+    return []
+
+
+def latest_text(records: list[dict[str, str]]) -> str:
+    if not records:
+        return "暂无数据"
+    latest = records[-1]
+    return f"已同步到 {latest['Date']} 第 {latest['Issue']} 期"
+
+
+def balls_html(values: list[int], class_name: str) -> str:
+    return "".join(f'<span class="ball {class_name}">{number(value)}</span>' for value in values)
+
+
+def latest_balls_html(lottery_id: str, records: list[dict[str, str]]) -> str:
+    if not records:
+        return '<span class="empty">等待同步</span>'
+    groups = record_groups(lottery_id, records[-1])
+    parts = []
+    for index, group in enumerate(groups):
+        area = LOTTERIES[lottery_id].areas[index]
+        parts.append(balls_html(group, area.color))
+    return "".join(parts)
+
+
+def area_counter(lottery_id: str, records: list[dict[str, str]], area_index: int) -> Counter[int]:
+    counter: Counter[int] = Counter()
+    for record in records:
+        for value in record_groups(lottery_id, record)[area_index]:
+            counter[value] += 1
+    return counter
+
+
+def build_frequency_rows(config: LotteryConfig, records: list[dict[str, str]], area_index: int) -> str:
+    area = config.areas[area_index]
+    counter = area_counter(config.lottery_id, records, area_index)
+    if not records:
+        return '<div class="empty">暂无统计数据</div>'
+    max_count = max(counter.values()) if counter else 1
+    expected = len(records) * area.count / (area.max_number - area.min_number + 1)
     rows = []
-    for item in items:
-        count = int(item["count"])
-        width = round(count / max_count * 100, 2)
-        tag = html.escape(str(item.get("tag", "")))
-        tag_html = f'<span class="tag">{tag}</span>' if tag else ""
-        state = html.escape(str(item.get("state", "normal")))
+    for value in range(area.min_number, area.max_number + 1):
+        count = counter[value]
+        percent = round(count / max_count * 100, 2) if max_count else 0
+        state = "中"
+        state_class = "normal"
+        if count >= expected * 1.08:
+            state = "热"
+            state_class = "hot"
+        elif count <= expected * 0.92:
+            state = "冷"
+            state_class = "cold"
         rows.append(
             f"""
-            <div class="bar-row {theme} {state}">
-              <div class="ball">{number(int(item["num"]))}</div>
-              <div class="bar-track"><div class="bar-fill" style="width:{width}%"></div></div>
-              <div class="bar-value">{count}次{tag_html}</div>
+            <div class="freq-row {area.color} {state_class}">
+              <span class="mini-ball">{number(value)}</span>
+              <span class="freq-track"><span class="freq-fill" style="width:{percent}%"></span></span>
+              <span class="freq-count">{count} 次</span>
+              <span class="freq-tag">{state}</span>
             </div>
             """
         )
     return "\n".join(rows)
 
 
-def build_sum_distribution(sum_counts: Counter[int]) -> str:
-    max_count = max(sum_counts.values())
+def build_history_rows(lottery_id: str, records: list[dict[str, str]], limit: int = 40) -> str:
     rows = []
-    for bucket in sorted(sum_counts):
-        count = sum_counts[bucket]
-        width = round(count / max_count * 100, 2)
+    for record in reversed(records[-limit:]):
+        groups = record_groups(lottery_id, record)
         rows.append(
             f"""
-            <div class="dist-row">
-              <div class="dist-label">{bucket}-{bucket + 9}</div>
-              <div class="dist-track"><div class="dist-fill" style="width:{width}%"></div></div>
-              <div class="dist-value">{count}期</div>
-            </div>
+            <tr data-lottery="{lottery_id}" data-search="{html.escape(record['Issue'] + ' ' + record['Date'] + ' ' + ' '.join(number(v) for group in groups for v in group))}">
+              <td>{html.escape(record["Issue"])}</td>
+              <td>{html.escape(record["Date"])}</td>
+              <td>{balls_html(groups[0], LOTTERIES[lottery_id].areas[0].color)}</td>
+              <td>{balls_html(groups[1], LOTTERIES[lottery_id].areas[1].color) if len(groups) > 1 else '<span class="muted">无</span>'}</td>
+            </tr>
             """
         )
-    return "\n".join(rows)
+    return "\n".join(rows) if rows else '<tr><td colspan="4">暂无数据</td></tr>'
 
 
-def build_trend_svg(recent: list[dict[str, object]]) -> str:
-    width = 920
-    height = 270
-    left = 46
-    right = 18
-    top = 20
-    bottom = 38
+def build_sum_svg(lottery_id: str, records: list[dict[str, str]]) -> str:
+    recent = records[-50:]
+    if len(recent) < 2:
+        return '<div class="empty">暂无趋势数据</div>'
+    values = [sum(record_groups(lottery_id, record)[0]) for record in recent]
+    width, height = 860, 260
+    left, right, top, bottom = 48, 20, 18, 36
     plot_width = width - left - right
     plot_height = height - top - bottom
-    values = [int(item["sum"]) for item in recent]
-    min_value = min(values) - 8
-    max_value = max(values) + 8
-    span = max_value - min_value or 1
+    low = min(values) - 5
+    high = max(values) + 5
+    span = high - low or 1
 
     def point(index: int, value: int) -> tuple[float, float]:
-        x = left + index / max(1, len(recent) - 1) * plot_width
-        y = top + (max_value - value) / span * plot_height
+        x = left + index / max(1, len(values) - 1) * plot_width
+        y = top + (high - value) / span * plot_height
         return x, y
 
-    path = " ".join(
-        ("M" if index == 0 else "L") + f"{point(index, value)[0]:.1f},{point(index, value)[1]:.1f}"
-        for index, value in enumerate(values)
-    )
-    avg_y = top + (max_value - 102) / span * plot_height
-    dots = []
-    labels = []
-    for index, item in enumerate(recent):
-        x, y = point(index, int(item["sum"]))
-        dots.append(
-            f'<circle class="trend-dot" cx="{x:.1f}" cy="{y:.1f}" r="3">'
-            f'<title>{html.escape(str(item["issue"]))}期 {html.escape(str(item["date"]))} 和值 {item["sum"]}</title>'
-            "</circle>"
-        )
-        if index % 12 == 0 or index == len(recent) - 1:
-            labels.append(f'<text class="axis-label" x="{x:.1f}" y="{height - 10}" text-anchor="middle">{html.escape(str(item["date"]))}</text>')
-
+    path = " ".join(("M" if index == 0 else "L") + f"{point(index, value)[0]:.1f},{point(index, value)[1]:.1f}" for index, value in enumerate(values))
+    avg_value = round(mean(values), 1)
+    avg_y = top + (high - avg_value) / span * plot_height
     grid = []
     for step in range(5):
-        value = round(min_value + (max_value - min_value) * step / 4)
-        y = top + (max_value - value) / span * plot_height
-        grid.append(f'<line class="grid-line" x1="{left}" y1="{y:.1f}" x2="{width - right}" y2="{y:.1f}"></line>')
-        grid.append(f'<text class="axis-label" x="{left - 10}" y="{y + 4:.1f}" text-anchor="end">{value}</text>')
-
+        value = round(low + (high - low) * step / 4)
+        y = top + (high - value) / span * plot_height
+        grid.append(f'<line class="grid" x1="{left}" y1="{y:.1f}" x2="{width - right}" y2="{y:.1f}"></line>')
+        grid.append(f'<text class="axis" x="{left - 8}" y="{y + 4:.1f}" text-anchor="end">{value}</text>')
+    dots = []
+    labels = []
+    for index, record in enumerate(recent):
+        x, y = point(index, values[index])
+        dots.append(f'<circle class="dot" cx="{x:.1f}" cy="{y:.1f}" r="3"><title>{record["Issue"]}期 {record["Date"]}：{values[index]}</title></circle>')
+        if index in (0, len(recent) - 1) or index % 12 == 0:
+            labels.append(f'<text class="axis" x="{x:.1f}" y="{height - 10}" text-anchor="middle">{html.escape(record["Date"][5:])}</text>')
     return f"""
-    <svg class="trend-svg" viewBox="0 0 {width} {height}" role="img" aria-label="近100期红球和值走势">
-      <g>{''.join(grid)}</g>
-      <line class="avg-line" x1="{left}" y1="{avg_y:.1f}" x2="{width - right}" y2="{avg_y:.1f}"></line>
-      <text class="avg-label" x="{width - right - 6}" y="{avg_y - 8:.1f}" text-anchor="end">均值 102</text>
-      <path class="trend-path" d="{path}"></path>
+    <svg class="trend-svg" viewBox="0 0 {width} {height}" role="img" aria-label="近50期一区号码和值趋势">
+      {''.join(grid)}
+      <line class="avg" x1="{left}" y1="{avg_y:.1f}" x2="{width - right}" y2="{avg_y:.1f}"></line>
+      <text class="avg-label" x="{width - right - 6}" y="{avg_y - 8:.1f}" text-anchor="end">均值 {avg_value}</text>
+      <path class="line" d="{path}"></path>
       {''.join(dots)}
       {''.join(labels)}
     </svg>
     """
 
 
-def main() -> None:
-    records = load_records()
-    total = len(records)
-    latest = records[-1]
-    data_modified = datetime.fromtimestamp(os.path.getmtime(DATA_FILE)).strftime("%Y-%m-%d %H:%M")
-    red_counter: Counter[int] = Counter()
-    blue_counter: Counter[int] = Counter()
-    sum_counter: Counter[int] = Counter()
-    pair_counter: Counter[str] = Counter()
-    zone_counter = Counter({"front": 0, "middle": 0, "back": 0})
+def recommend_groups(config: LotteryConfig, records: list[dict[str, str]]) -> list[dict[str, str]]:
+    if not records:
+        return []
+    groups = []
+    for area_index, area in enumerate(config.areas):
+        counter = area_counter(config.lottery_id, records, area_index)
+        hot = [num for num, _ in counter.most_common(area.count + 2)]
+        cold = [num for num, _ in sorted(counter.items(), key=lambda item: item[1])[: max(1, area.count)]]
+        balanced = sorted((hot[: area.count - 1] + cold[:1])[: area.count])
+        groups.append({"label": area.label, "numbers": " ".join(number(value) for value in balanced)})
+    return groups
 
-    enriched = []
-    for record in records:
-        reds = red_numbers(record)
-        red_sum = sum(reds)
-        for red in reds:
-            red_counter[red] += 1
-            if red <= 11:
-                zone_counter["front"] += 1
-            elif red <= 22:
-                zone_counter["middle"] += 1
-            else:
-                zone_counter["back"] += 1
-        blue_counter[int(record["Blue"])] += 1
-        sum_counter[red_sum // 10 * 10] += 1
-        for left, right in zip(reds, reds[1:]):
-            if right - left == 1:
-                pair_counter[f"{number(left)}-{number(right)}"] += 1
-        enriched.append({**record, "RedSum": red_sum})
 
-    red_avg = total * 6 / 33
-    blue_avg = total / 16
-    red_items = []
-    for num in range(1, 34):
-        count = red_counter[num]
-        if count >= red_avg + 25:
-            tag = "偏热"
-            state = "hot"
-        elif count <= red_avg - 25:
-            tag = "偏冷"
-            state = "cold"
-        else:
-            tag = ""
-            state = "normal"
-        red_items.append({"num": num, "count": count, "tag": tag, "state": state})
+def lottery_payload() -> dict[str, object]:
+    payload: dict[str, object] = {"lotteries": {}, "disclaimer": DISCLAIMER}
+    for lottery_id, config in LOTTERIES.items():
+        records = load_records(config)
+        payload["lotteries"][lottery_id] = {
+            "id": lottery_id,
+            "name": config.name,
+            "shortName": config.short_name,
+            "officialSource": config.official_source,
+            "sourceUrl": config.source_url,
+            "drawDays": config.draw_days,
+            "areas": [area.__dict__ for area in config.areas],
+            "records": records,
+            "latestText": latest_text(records),
+        }
+    return payload
 
-    blue_items = []
-    for num in range(1, 17):
-        count = blue_counter[num]
-        if count >= blue_avg + 12:
-            tag = "偏热"
-            state = "hot"
-        elif count <= blue_avg - 12:
-            tag = "偏冷"
-            state = "cold"
-        else:
-            tag = ""
-            state = "normal"
-        blue_items.append({"num": num, "count": count, "tag": tag, "state": state})
 
-    hot_reds = sorted(red_items, key=lambda item: item["count"], reverse=True)[:6]
-    cold_reds = sorted(red_items, key=lambda item: item["count"])[:6]
-    hot_blues = sorted(blue_items, key=lambda item: item["count"], reverse=True)[:4]
-    cold_blues = sorted(blue_items, key=lambda item: item["count"])[:4]
-    recent = enriched[-100:]
-    recent_table = list(reversed(enriched[-30:]))
-    data_json = json.dumps(
-        {
-            "records": enriched,
-            "total": total,
-            "latest": latest,
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+def build_page() -> str:
+    data = lottery_payload()
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lottery_cards = []
+    history_sections = []
+    frequency_sections = []
+    trend_sections = []
+    recommend_sections = []
 
-    red_rows = build_bar_rows(red_items, max(item["count"] for item in red_items), "warm")
-    blue_rows = build_bar_rows(blue_items, max(item["count"] for item in blue_items), "cool")
-    sum_rows = build_sum_distribution(sum_counter)
-    trend_svg = build_trend_svg(
-        [{"issue": item["Issue"], "date": item["Date"][5:], "sum": item["RedSum"]} for item in recent]
-    )
-    pair_cards = "\n".join(
-        f"""
-        <div class="pair-card">
-          <span class="pair-balls">{pair}</span>
-          <span class="pair-count">{count}次</span>
-        </div>
-        """
-        for pair, count in pair_counter.most_common(10)
-    )
-    latest_balls = "".join(f'<span class="red-ball">{value}</span>' for value in latest["Red"].split(","))
-    latest_blue = f'<span class="blue-ball">{latest["Blue"]}</span>'
-    official_source = "中国福彩网 / 中彩网公开开奖信息"
-    sync_status = f"已同步到 {latest['Date']} 第 {latest['Issue']} 期"
-    update_hint = "后台会先核对官方最新开奖日期；只有官方日期或号码变化时才更新页面。"
-    disclaimer = (
-        "本页面基于中国福彩网/中彩网等公开开奖信息整理，仅用于开奖记录查询、历史统计和中奖核验参考。"
-        "彩票开奖结果具有随机性，历史统计不代表未来开奖结果，也不构成购彩建议。"
-        "中奖结果、奖级和兑奖规则以官方公告及销售机构规定为准。请理性参与，未成年人不得购买彩票。"
-    )
-    table_rows = "\n".join(
-        f"""
-        <tr>
-          <td>{html.escape(item["Issue"])}</td>
-          <td>{html.escape(item["Date"])}</td>
-          <td class="balls-cell">{''.join(f'<span class="red-ball">{value}</span>' for value in item["Red"].split(","))}</td>
-          <td><span class="blue-ball">{html.escape(item["Blue"])}</span></td>
-          <td>{item["RedSum"]}</td>
-        </tr>
-        """
-        for item in recent_table
-    )
-    hot_red_text = "、".join(number(int(item["num"])) for item in hot_reds)
-    cold_red_text = "、".join(number(int(item["num"])) for item in cold_reds)
-    hot_blue_text = "、".join(number(int(item["num"])) for item in hot_blues)
-    cold_blue_text = "、".join(number(int(item["num"])) for item in cold_blues)
-    sums = [item["RedSum"] for item in enriched]
-    html_text = f"""<!doctype html>
+    for lottery_id, config in LOTTERIES.items():
+        records = load_records(config)
+        latest = records[-1] if records else None
+        latest_issue = f"第 {latest['Issue']} 期" if latest else "等待同步"
+        lottery_cards.append(
+            f"""
+            <button class="lottery-card {'active' if lottery_id == 'ssq' else ''}" data-lottery="{lottery_id}" type="button">
+              <span class="lottery-card-head"><strong>{config.short_name}</strong><small>{html.escape(config.draw_days)}</small></span>
+              <span class="lottery-balls">{latest_balls_html(lottery_id, records)}</span>
+              <span class="lottery-meta">{latest_text(records)} · {config.official_source}</span>
+            </button>
+            """
+        )
+        history_sections.append(
+            f"""
+            <tbody class="history-body {'active' if lottery_id == 'ssq' else ''}" data-lottery-panel="{lottery_id}">
+              {build_history_rows(lottery_id, records)}
+            </tbody>
+            """
+        )
+        area_blocks = []
+        for area_index, area in enumerate(config.areas):
+            area_blocks.append(
+                f"""
+                <div class="panel mini-panel">
+                  <div class="panel-title"><h3>{config.short_name}{area.label}频率</h3><span>{area.min_number}-{area.max_number}</span></div>
+                  <div class="freq-list">{build_frequency_rows(config, records, area_index)}</div>
+                </div>
+                """
+            )
+        frequency_sections.append(
+            f'<div class="frequency-panel {"active" if lottery_id == "ssq" else ""}" data-lottery-panel="{lottery_id}">{"".join(area_blocks)}</div>'
+        )
+        trend_sections.append(
+            f"""
+            <div class="trend-panel {'active' if lottery_id == 'ssq' else ''}" data-lottery-panel="{lottery_id}">
+              <div class="panel-title"><h3>{config.short_name}近50期一区和值趋势</h3><span>只看走势，不代表未来结果</span></div>
+              {build_sum_svg(lottery_id, records)}
+            </div>
+            """
+        )
+        rec_parts = recommend_groups(config, records)
+        recommend_sections.append(
+            f"""
+            <div class="recommend-panel {'active' if lottery_id == 'ssq' else ''}" data-lottery-panel="{lottery_id}">
+              <div class="rec-card">
+                <strong>{config.short_name}统计参考 A</strong>
+                <p>{'　'.join(f'{item["label"]}：{item["numbers"]}' for item in rec_parts) or '暂无数据'}</p>
+                <small>理由：混合高频号码和少量低频号码，帮助观察分布；不代表预测。</small>
+              </div>
+              <div class="rec-card">
+                <strong>{config.short_name}统计参考 B</strong>
+                <p>建议结合个人预算，只做娱乐参考。</p>
+                <small>风险提示：彩票开奖结果具有随机性，历史频率不能推出未来号码。</small>
+              </div>
+            </div>
+            """
+        )
+
+    data_json = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>双色球历史数据分析工具</title>
+  <title>彩票开奖数据中心</title>
   <style>
     :root {{
-      --page: #f7f8fb;
-      --ink: #1c2430;
-      --muted: #667085;
-      --line: #e3e7ee;
-      --panel: #ffffff;
-      --orange-1: #e86f18;
-      --orange-2: #d94a16;
-      --orange-3: #f7a441;
-      --orange-soft: #f4c2a5;
-      --blue-1: #1f7ae0;
-      --blue-2: #1254b8;
-      --blue-soft: #b9d3f4;
-      --ok: #16a34a;
+      --page:#f6f7fb; --card:#ffffff; --ink:#202633; --muted:#667085; --line:#e4e7ec;
+      --warm:#f05a28; --warm-soft:#f4b29a; --warm-mid:#ff914d;
+      --cool:#176fd1; --cool-soft:#c4dcf5; --cool-mid:#63adff;
+      --green:#1f8a58; --amber:#a76813; --shadow:0 18px 45px rgba(31,41,55,.08);
     }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
-      background: var(--page);
-      color: var(--ink);
-    }}
-    .shell {{ max-width: 1240px; margin: 0 auto; padding: 22px; }}
-    .topbar {{
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 20px;
-      align-items: center;
-      margin-bottom: 18px;
-    }}
-    h1 {{ margin: 0 0 8px; font-size: 28px; font-weight: 700; }}
-    .subtitle {{ margin: 0; color: var(--muted); }}
-    .latest {{
-      min-width: 360px;
-      background: linear-gradient(135deg, #fff7ef, #eef6ff);
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 14px;
-    }}
-    .latest-title {{ color: var(--muted); font-size: 13px; margin-bottom: 8px; }}
-    .latest-row {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
-    .status-card {{
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 10px;
-      margin: 0 0 16px;
-    }}
-    .status-item {{
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 12px 14px;
-    }}
-    .status-label {{ color: var(--muted); font-size: 12px; margin-bottom: 5px; }}
-    .status-value {{ font-weight: 800; }}
-    .status-help {{ color: var(--muted); font-size: 13px; line-height: 1.6; }}
-    .sync-ok {{
-      color: #136f3a;
-      background: #e9f8ef;
-      border: 1px solid #bfe8cd;
-      border-radius: 999px;
-      display: inline-block;
-      padding: 3px 9px;
-      font-size: 13px;
-      font-weight: 800;
-      margin-top: 6px;
-    }}
-    .disclaimer {{
-      border-left: 4px solid var(--orange-1);
-      background: #fffaf5;
-      line-height: 1.8;
-    }}
-    .red-ball, .blue-ball {{
-      display: inline-flex;
-      width: 30px;
-      height: 30px;
-      align-items: center;
-      justify-content: center;
-      border-radius: 50%;
-      color: #fff;
-      font-size: 13px;
-      font-weight: 700;
-      box-shadow: inset 0 -2px 5px rgba(0,0,0,.18);
-    }}
-    .red-ball {{ background: linear-gradient(135deg, var(--orange-1), var(--orange-2)); }}
-    .blue-ball {{ background: linear-gradient(135deg, var(--blue-1), var(--blue-2)); }}
-    .tabs {{ display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0 20px; }}
-    .tab {{
-      border: 1px solid var(--line);
-      background: var(--panel);
-      color: var(--muted);
-      padding: 9px 14px;
-      border-radius: 8px;
-      cursor: pointer;
-      font-size: 14px;
-    }}
-    .tab.active {{ color: #fffaf4; background: var(--orange-1); border-color: var(--orange-1); box-shadow: 0 0 0 3px rgba(232,111,24,.12); }}
-    .section {{ display: none; }}
-    .section.active {{ display: block; }}
-    .summary-grid {{
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
-      margin-bottom: 18px;
-    }}
-    .metric {{
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 14px;
-    }}
-    .metric-label {{ color: var(--muted); font-size: 13px; margin-bottom: 6px; }}
-    .metric-value {{ font-size: 24px; font-weight: 800; }}
-    .panel {{
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 18px;
-      margin-bottom: 16px;
-    }}
-    .panel h2 {{ margin: 0 0 14px; font-size: 18px; }}
-    .two-col {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
-    .bar-list {{ display: grid; gap: 8px; }}
-    .bar-row {{
-      display: grid;
-      grid-template-columns: 48px minmax(120px, 1fr) 112px;
-      gap: 12px;
-      align-items: center;
-      min-height: 42px;
-    }}
-    .ball {{
-      width: 36px;
-      height: 36px;
-      display: grid;
-      place-items: center;
-      border-radius: 50%;
-      color: #fff;
-      font-weight: 800;
-      font-size: 13px;
-      border: 2px solid rgba(255,255,255,.88);
-      box-shadow: 0 4px 12px rgba(20, 28, 40, .14);
-    }}
-    .warm.hot .ball {{
-      width: 40px;
-      height: 40px;
-      background: linear-gradient(135deg, #f26a21 0%, #d94a16 72%, #f7a441 100%);
-      box-shadow: 0 5px 14px rgba(232, 111, 24, .24);
-    }}
-    .warm.cold .ball {{
-      background: linear-gradient(135deg, #f4c2a5 0%, #df9c7b 100%);
-      color: #653326;
-      border-color: #f8d8c5;
-      box-shadow: 0 4px 10px rgba(120, 72, 58, .12);
-    }}
-    .warm.normal .ball {{
-      background: linear-gradient(135deg, #ee7b2a 0%, #dc5a18 100%);
-    }}
-    .cool.hot .ball {{
-      width: 40px;
-      height: 40px;
-      background: linear-gradient(135deg, #66b4ff 0%, #1f7ae0 70%, #1254b8 100%);
-      box-shadow: 0 5px 14px rgba(31, 122, 224, .24);
-    }}
-    .cool.cold .ball {{
-      background: linear-gradient(135deg, #b9d3f4 0%, #7fa9dc 100%);
-      color: #173b67;
-      border-color: #d6e5f7;
-      box-shadow: 0 4px 10px rgba(31, 122, 224, .12);
-    }}
-    .cool.normal .ball {{
-      background: linear-gradient(135deg, #2f80ed 0%, #1f7ae0 100%);
-    }}
-    .bar-track {{
-      height: 18px;
-      background: #edf1f6;
-      border-radius: 99px;
-      overflow: hidden;
-      border: 1px solid #e1e6ef;
-    }}
-    .bar-fill {{ height: 100%; border-radius: 99px; }}
-    .warm.hot .bar-fill {{ background: linear-gradient(90deg, #f7a441, #e86f18, #d94a16); }}
-    .warm.cold .bar-fill {{ background: linear-gradient(90deg, #f8d8c5, #f4c2a5, #df9c7b); }}
-    .warm.normal .bar-fill {{ background: linear-gradient(90deg, #f7b15b, #e86f18); }}
-    .cool.hot .bar-fill {{ background: linear-gradient(90deg, #66b4ff, #1f7ae0, #1254b8); }}
-    .cool.cold .bar-fill {{ background: linear-gradient(90deg, #d6e5f7, #b9d3f4, #7fa9dc); }}
-    .cool.normal .bar-fill {{ background: linear-gradient(90deg, #7bbcff, #1f7ae0); }}
-    .bar-value {{ color: var(--muted); font-size: 13px; text-align: right; white-space: nowrap; }}
-    .tag {{
-      display: inline-block;
-      margin-left: 6px;
-      padding: 1px 6px;
-      border-radius: 999px;
-      color: var(--ink);
-      background: #f2f4f8;
-      font-weight: 700;
-      font-size: 12px;
-    }}
-    .hot .tag {{ background: #fff0d6; color: #9a3c00; }}
-    .cold .tag {{ background: #f5ddd5; color: #7a3e31; }}
-    .cool.cold .tag {{ background: #dde5ff; color: #203071; }}
-    .trend-svg {{ width: 100%; height: auto; display: block; }}
-    .grid-line {{ stroke: #e7ebf2; stroke-width: 1; }}
-    .avg-line {{ stroke: #f59e0b; stroke-width: 2; stroke-dasharray: 7 6; }}
-    .avg-label, .axis-label {{ fill: var(--muted); font-size: 12px; }}
-    .trend-path {{ fill: none; stroke: var(--orange-1); stroke-width: 3; }}
-    .trend-dot {{ fill: var(--orange-2); stroke: #fff; stroke-width: 2; }}
-    .dist-row {{
-      display: grid;
-      grid-template-columns: 70px minmax(160px, 1fr) 70px;
-      gap: 10px;
-      align-items: center;
-      margin: 8px 0;
-    }}
-    .dist-label, .dist-value {{ color: var(--muted); font-size: 13px; }}
-    .dist-track {{ height: 16px; border-radius: 99px; background: #edf1f6; overflow: hidden; }}
-    .dist-fill {{ height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--orange-3), var(--orange-1)); }}
-    .pair-grid {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }}
-    .pair-card {{
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 12px;
-      background: linear-gradient(135deg, #fff8ed, #fff);
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-    }}
-    .pair-balls {{ font-weight: 800; color: var(--orange-1); }}
-    .pair-count {{ color: var(--muted); }}
-    .recommend {{
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 14px;
-    }}
-    .rec-card {{
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 16px;
-      background: #fff;
-    }}
-    .rec-card strong {{ color: var(--ink); }}
-    .rec-card p {{ margin: 8px 0 0; color: var(--muted); }}
-    .search-row {{ display: grid; grid-template-columns: 180px 1fr auto; gap: 10px; margin-bottom: 12px; }}
-    select, input, textarea, button {{
-      font: inherit;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 10px 12px;
-      background: #fff;
-      color: var(--ink);
-    }}
-    textarea {{
-      min-height: 148px;
-      resize: vertical;
-      width: 100%;
-    }}
-    button {{ cursor: pointer; background: var(--orange-1); color: #fffaf4; border: none; font-weight: 700; }}
-    .button-row {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }}
-    .secondary-btn {{ background: #eef2f7; color: var(--ink); border: 1px solid var(--line); }}
-    .checker-grid {{
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 16px;
-    }}
-    .checker-actions {{
-      display: grid;
-      grid-template-columns: minmax(180px, 240px) 1fr auto;
-      gap: 10px;
-      margin-bottom: 12px;
-    }}
-    .result-list {{ display: grid; gap: 10px; margin-top: 12px; }}
-    .result-card {{
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 12px;
-      background: #fff;
-    }}
-    .result-head {{
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: center;
-      margin-bottom: 10px;
-      color: var(--muted);
-      font-size: 13px;
-    }}
-    .prize {{
-      color: #a23b00;
-      background: #fff0d6;
-      border-radius: 999px;
-      padding: 3px 9px;
-      font-weight: 800;
-    }}
-    .miss {{ color: var(--muted); background: #f2f4f8; }}
-    .hit-red {{ outline: 3px solid rgba(232, 111, 24, .34); }}
-    .hit-blue {{ outline: 3px solid rgba(31, 122, 224, .34); }}
-    table {{ width: 100%; border-collapse: collapse; }}
-    th, td {{ padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; }}
-    th {{ color: var(--muted); font-weight: 700; background: #fafbfc; }}
-    .balls-cell {{ min-width: 220px; }}
-    .note {{ color: var(--muted); font-size: 13px; margin-top: 10px; }}
-    @media (max-width: 880px) {{
-      .topbar, .two-col, .recommend, .summary-grid, .checker-grid, .status-card {{ grid-template-columns: 1fr; }}
-      .latest {{ min-width: 0; }}
-      .pair-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-      .search-row, .checker-actions {{ grid-template-columns: 1fr; }}
-      .shell {{ padding: 14px; }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; background:var(--page); color:var(--ink); font-family:"Microsoft YaHei", "PingFang SC", Arial, sans-serif; line-height:1.6; }}
+    .page {{ max-width:1220px; margin:0 auto; padding:24px; }}
+    .hero {{ display:grid; grid-template-columns:1.15fr .85fr; gap:16px; align-items:stretch; }}
+    .hero-main {{ border-radius:28px; padding:26px; background:linear-gradient(135deg,#fff3ec,#eef6ff); border:1px solid var(--line); box-shadow:var(--shadow); }}
+    .hero-side, .panel {{ border-radius:24px; background:var(--card); border:1px solid var(--line); box-shadow:var(--shadow); padding:18px; }}
+    h1 {{ margin:0 0 8px; font-size:34px; letter-spacing:-.04em; }}
+    h2, h3 {{ margin:0; }}
+    p {{ margin:0; }}
+    .muted, small {{ color:var(--muted); }}
+    .search-row {{ display:grid; grid-template-columns:1fr auto; gap:10px; margin:18px 0 14px; }}
+    input, textarea, select {{ width:100%; border:1px solid var(--line); border-radius:14px; padding:11px 12px; font:inherit; background:#fff; color:var(--ink); }}
+    textarea {{ min-height:120px; resize:vertical; }}
+    button {{ font:inherit; }}
+    .btn {{ border:1px solid var(--line); background:#fff; color:var(--ink); border-radius:999px; padding:10px 14px; cursor:pointer; }}
+    .btn.primary {{ background:var(--ink); color:#fff; border-color:var(--ink); }}
+    .chips, .tabs, .action-row {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .chip, .tab {{ border:1px solid var(--line); background:#fff; border-radius:999px; padding:8px 12px; cursor:pointer; }}
+    .tab.active, .chip.active {{ border-color:var(--ink); background:var(--ink); color:#fff; }}
+    .status-list {{ display:grid; gap:10px; }}
+    .status-row {{ display:flex; justify-content:space-between; gap:12px; border-bottom:1px dashed var(--line); padding-bottom:9px; }}
+    .status-row:last-child {{ border-bottom:0; padding-bottom:0; }}
+    .ok {{ color:var(--green); font-weight:700; }}
+    .lottery-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:18px 0; }}
+    .lottery-card {{ text-align:left; display:grid; gap:9px; border:1px solid var(--line); border-radius:20px; padding:14px; background:#fff; cursor:pointer; }}
+    .lottery-card.active {{ border-color:var(--ink); background:linear-gradient(135deg,#fff8f3,#eef6ff); }}
+    .lottery-card-head {{ display:flex; justify-content:space-between; gap:10px; align-items:center; }}
+    .lottery-meta {{ color:var(--muted); font-size:13px; }}
+    .ball, .mini-ball {{ display:inline-flex; align-items:center; justify-content:center; border-radius:999px; font-weight:700; font-variant-numeric:tabular-nums; }}
+    .ball {{ width:32px; height:32px; margin:0 4px 4px 0; }}
+    .mini-ball {{ width:30px; height:30px; }}
+    .warm {{ background:linear-gradient(145deg,var(--warm-mid),var(--warm)); color:#fff8f3; }}
+    .cool {{ background:linear-gradient(145deg,var(--cool-mid),var(--cool)); color:#eef7ff; }}
+    .neutral {{ background:linear-gradient(145deg,#eef1f6,#d7dee8); color:#344054; }}
+    .main {{ display:grid; grid-template-columns:260px 1fr; gap:16px; align-items:start; }}
+    .sidebar {{ position:sticky; top:16px; }}
+    .content {{ display:grid; gap:16px; }}
+    .section {{ display:none; }}
+    .section.active {{ display:block; }}
+    .panel-title {{ display:flex; justify-content:space-between; gap:12px; align-items:center; margin-bottom:12px; }}
+    .two-col {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
+    .three-col {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
+    .feature {{ border:1px solid var(--line); border-radius:18px; padding:14px; background:#fbfcff; }}
+    .history-body, .frequency-panel, .trend-panel, .recommend-panel {{ display:none; }}
+    .history-body.active {{ display:table-row-group; }}
+    .frequency-panel.active, .trend-panel.active, .recommend-panel.active {{ display:grid; gap:14px; }}
+    table {{ width:100%; border-collapse:collapse; }}
+    th, td {{ border-bottom:1px solid var(--line); padding:10px 8px; text-align:left; vertical-align:middle; }}
+    th {{ color:var(--muted); font-weight:700; }}
+    .table-wrap {{ overflow:auto; }}
+    .freq-list {{ display:grid; gap:8px; }}
+    .freq-row {{ display:grid; grid-template-columns:34px 1fr 56px 36px; gap:8px; align-items:center; }}
+    .freq-track {{ height:10px; border-radius:999px; background:#edf0f5; overflow:hidden; }}
+    .freq-fill {{ display:block; height:100%; border-radius:999px; }}
+    .freq-row.warm .freq-fill {{ background:linear-gradient(90deg,var(--warm-soft),var(--warm)); }}
+    .freq-row.cool .freq-fill {{ background:linear-gradient(90deg,var(--cool-soft),var(--cool)); }}
+    .freq-row.warm.cold .mini-ball {{ background:linear-gradient(145deg,#ffd9ca,var(--warm-soft)); color:#6e321f; }}
+    .freq-row.warm.hot .mini-ball {{ background:linear-gradient(145deg,var(--warm-mid),var(--warm)); color:#fff8f3; }}
+    .freq-row.cool.cold .mini-ball {{ background:linear-gradient(145deg,#e7f2ff,var(--cool-soft)); color:#204c76; }}
+    .freq-row.cool.hot .mini-ball {{ background:linear-gradient(145deg,var(--cool-mid),var(--cool)); color:#eef7ff; }}
+    .freq-row.normal .mini-ball {{ background:#eef1f6; color:#344054; }}
+    .trend-svg {{ width:100%; height:auto; }}
+    .grid {{ stroke:#e4e7ec; stroke-width:1; }}
+    .axis, .avg-label {{ fill:#667085; font-size:12px; }}
+    .line {{ fill:none; stroke:var(--warm); stroke-width:3; }}
+    .dot {{ fill:var(--cool); }}
+    .avg {{ stroke:#98a2b3; stroke-dasharray:6 6; }}
+    .checker-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
+    .result {{ margin-top:12px; border-radius:16px; padding:12px; background:#f8fafc; border:1px solid var(--line); white-space:pre-wrap; }}
+    .rec-card, .notice {{ border-radius:18px; padding:14px; border:1px solid var(--line); background:#fbfcff; }}
+    .notice {{ background:#fff8ed; border-color:#f0d7ad; }}
+    .footer {{ margin-top:18px; color:var(--muted); text-align:center; font-size:13px; }}
+    .empty {{ color:var(--muted); }}
+    @media (max-width:860px) {{
+      .page {{ padding:14px; }}
+      .hero, .main, .two-col, .three-col, .checker-grid {{ grid-template-columns:1fr; }}
+      .sidebar {{ position:static; }}
+      .lottery-grid {{ grid-template-columns:1fr; }}
+      h1 {{ font-size:28px; }}
+      .search-row {{ grid-template-columns:1fr; }}
     }}
   </style>
 </head>
 <body>
-  <main class="shell">
-    <header class="topbar">
-      <div>
-        <h1>双色球开奖查询与统计参考</h1>
-        <p class="subtitle">历史开奖、中奖核验、号码分布，一页查看。仅基于历史数据整理，不预测开奖结果。</p>
-      </div>
-      <aside class="latest">
-        <div class="latest-title">最新开奖 {html.escape(latest["Issue"])}期 · {html.escape(latest["Date"])}</div>
-        <div class="latest-row">{latest_balls}{latest_blue}</div>
-        <div class="sync-ok">{html.escape(sync_status)}</div>
+  <div class="page">
+    <header class="hero">
+      <section class="hero-main">
+        <h1>彩票开奖数据中心</h1>
+        <p class="muted">公开开奖记录查询、中奖核验、号码统计和同步状态说明。先支持双色球和大乐透，后续彩种按配置逐步接入。</p>
+        <div class="search-row">
+          <input id="globalSearch" type="search" placeholder="输入彩种、期号、日期或号码，例如：双色球 2026086 / 大乐透 26084 / 04 07 13">
+          <button class="btn primary" type="button" id="searchBtn">一键查询</button>
+        </div>
+        <div class="chips">
+          <span class="chip active">双色球</span>
+          <span class="chip">大乐透</span>
+          <span class="chip">福彩3D</span>
+          <span class="chip">排列3</span>
+          <span class="chip">排列5</span>
+          <span class="chip">七星彩</span>
+          <span class="chip">七乐彩</span>
+        </div>
+      </section>
+      <aside class="hero-side">
+        <div class="panel-title"><h2>同步与来源</h2><span class="ok">自动检查</span></div>
+        <div class="status-list">
+          <div class="status-row"><span>双色球</span><strong>{data["lotteries"]["ssq"]["latestText"]}</strong></div>
+          <div class="status-row"><span>大乐透</span><strong>{data["lotteries"]["dlt"]["latestText"]}</strong></div>
+          <div class="status-row"><span>官方来源</span><strong>中国福彩网 / 中国体彩网</strong></div>
+          <div class="status-row"><span>生成时间</span><strong>{generated_at}</strong></div>
+        </div>
       </aside>
     </header>
 
-    <section class="status-card" aria-label="数据状态">
-      <div class="status-item">
-        <div class="status-label">同步状态</div>
-        <div class="status-value">{html.escape(sync_status)}</div>
-      </div>
-      <div class="status-item">
-        <div class="status-label">页面更新时间</div>
-        <div class="status-value">{html.escape(data_modified)}</div>
-      </div>
-      <div class="status-item">
-        <div class="status-label">官方来源</div>
-        <div class="status-help">{html.escape(official_source)}</div>
-      </div>
-      <div class="status-item">
-        <div class="status-label">同步说明</div>
-        <div class="status-help">{html.escape(update_hint)}</div>
-      </div>
+    <section class="lottery-grid" aria-label="彩种选择">
+      {''.join(lottery_cards)}
     </section>
 
-    <nav class="tabs" aria-label="功能切换">
-      <button class="tab active" data-tab="history" type="button">历史查询</button>
-      <button class="tab" data-tab="checker" type="button">中奖核验</button>
-      <button class="tab" data-tab="overview" type="button">数据总览</button>
-      <button class="tab" data-tab="red" type="button">红球统计</button>
-      <button class="tab" data-tab="blue" type="button">蓝球统计</button>
-      <button class="tab" data-tab="trend" type="button">和值趋势</button>
-      <button class="tab" data-tab="recommend" type="button">选号参考</button>
-    </nav>
+    <main class="main">
+      <aside class="panel sidebar">
+        <div class="panel-title"><h2>功能入口</h2><span id="currentLotteryLabel">双色球</span></div>
+        <div class="tabs">
+          <button class="tab active" data-section="history" type="button">历史查询</button>
+          <button class="tab" data-section="checker" type="button">中奖核验</button>
+          <button class="tab" data-section="stats" type="button">号码统计</button>
+          <button class="tab" data-section="trend" type="button">走势查看</button>
+          <button class="tab" data-section="recommend" type="button">选号参考</button>
+          <button class="tab" data-section="about" type="button">同步说明</button>
+        </div>
+      </aside>
 
-    <section id="history" class="section active">
-      <div class="panel">
-        <h2>历年开奖记录查询</h2>
-        <div class="search-row">
-          <select id="yearSelect" aria-label="按年份筛选"></select>
-          <input id="issueInput" placeholder="输入期号，例如 26085" aria-label="按期号查询">
-          <button id="resetBtn" type="button">显示最近30期</button>
-        </div>
-        <table>
-          <thead><tr><th>期号</th><th>开奖日期</th><th>红球</th><th>蓝球</th><th>和值</th></tr></thead>
-          <tbody id="historyBody">{table_rows}</tbody>
-        </table>
-        <div class="note" id="historyNote">当前显示最近30期。可按年份或期号查询。</div>
-      </div>
-    </section>
-
-    <section id="checker" class="section">
-      <div class="panel">
-        <h2>中奖核验</h2>
-        <div class="checker-actions">
-          <select id="checkIssueSelect" aria-label="选择核验期号"></select>
-          <input id="singleTicketInput" placeholder="输入号码：01 02 03 04 05 06 + 07" aria-label="单注号码">
-          <button id="checkSingleBtn" type="button">核验单注</button>
-        </div>
-        <div class="button-row">
-          <button id="fillExampleBtn" class="secondary-btn" type="button">填入示例号码</button>
-          <button id="clearCheckBtn" class="secondary-btn" type="button">清空核验结果</button>
-        </div>
-        <div class="checker-grid">
-          <div>
-            <textarea id="batchTicketInput" aria-label="批量号码" placeholder="批量核验：每行一注，例如
-01 02 03 04 05 06 + 07
-08,09,10,11,12,13,14"></textarea>
-            <div class="note">支持空格、逗号、加号等格式；每行识别前 6 个红球和第 7 个蓝球。</div>
-            <button id="checkBatchBtn" type="button" style="margin-top:10px;">批量核验</button>
+      <div class="content">
+        <section id="history" class="section active panel">
+          <div class="panel-title"><h2>历史查询</h2><span class="muted">默认显示最近 40 期</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>期号</th><th>日期</th><th>一区号码</th><th>二区号码</th></tr></thead>
+              {''.join(history_sections)}
+            </table>
           </div>
-          <div>
-            <div class="note" id="drawInfo"></div>
-            <div class="result-list" id="checkResults"></div>
+        </section>
+
+        <section id="checker" class="section panel">
+          <div class="panel-title"><h2>中奖核验</h2><span class="muted">结果以官方规则为准</span></div>
+          <div class="checker-grid">
+            <div>
+              <label>一区号码</label>
+              <input id="mainNumbers" placeholder="输入一区/开奖号码，例如 双色球6个红球、大乐透5个前区、排列5填5位数字">
+            </div>
+            <div>
+              <label>二区号码</label>
+              <input id="specialNumbers" placeholder="有二区再填，例如 双色球蓝球、大乐透后区、七乐彩特别号；数字彩可留空">
+            </div>
           </div>
-        </div>
+          <div class="action-row" style="margin-top:12px">
+            <button class="btn primary" id="checkSingle" type="button">核验当前号码</button>
+            <button class="btn" id="fillExample" type="button">示例填入</button>
+            <button class="btn" id="clearResult" type="button">清空结果</button>
+          </div>
+          <label style="display:block;margin-top:14px">批量核验（一行一注，前后区用 + 分隔）</label>
+          <textarea id="batchNumbers" placeholder="例：01 02 03 04 05 06 + 07&#10;13 25 30 32 33 + 04 05&#10;3 0 5"></textarea>
+          <div class="action-row" style="margin-top:12px">
+            <button class="btn" id="checkBatch" type="button">批量核验</button>
+            <button class="btn" id="exportCsv" type="button">导出 CSV</button>
+          </div>
+          <div id="checkResult" class="result">请输入号码后核验。</div>
+        </section>
+
+        <section id="stats" class="section">
+          {''.join(frequency_sections)}
+        </section>
+
+        <section id="trend" class="section panel">
+          {''.join(trend_sections)}
+        </section>
+
+        <section id="recommend" class="section panel">
+          <div class="panel-title"><h2>选号参考</h2><span class="muted">统计参考，不是预测</span></div>
+          {''.join(recommend_sections)}
+        </section>
+
+        <section id="about" class="section panel">
+          <div class="panel-title"><h2>同步说明</h2><span class="ok">失败保护已开启</span></div>
+          <div class="three-col">
+            <div class="feature"><strong>官方公开数据</strong><p class="muted">福彩类优先查询中国福彩网，体彩类优先查询中国体彩网。</p></div>
+            <div class="feature"><strong>自动同步日期</strong><p class="muted">GitHub Actions 定时检查最新开奖，数据变化后生成新版网页。</p></div>
+            <div class="feature"><strong>保留旧数据</strong><p class="muted">官方接口异常或网络失败时，不会清空已可用页面。</p></div>
+          </div>
+          <div class="notice" style="margin-top:14px"><strong>权威免责声明</strong><p>{html.escape(DISCLAIMER)}</p></div>
+        </section>
       </div>
-    </section>
-
-    <section id="overview" class="section">
-      <div class="summary-grid">
-        <div class="metric"><div class="metric-label">统计期数</div><div class="metric-value">{total}</div></div>
-        <div class="metric"><div class="metric-label">数据范围</div><div class="metric-value">{records[0]["Date"][:4]}-{records[-1]["Date"][:4]}</div></div>
-        <div class="metric"><div class="metric-label">红球和值均值</div><div class="metric-value">{mean(sums):.1f}</div></div>
-        <div class="metric"><div class="metric-label">常见和值区间</div><div class="metric-value">90-119</div></div>
-      </div>
-      <div class="two-col">
-        <div class="panel"><h2>红球频率总览</h2><div class="bar-list">{red_rows}</div></div>
-        <div class="panel"><h2>蓝球频率总览</h2><div class="bar-list">{blue_rows}</div></div>
-      </div>
-    </section>
-
-    <section id="red" class="section">
-      <div class="panel"><h2>红球出现频率</h2><div class="bar-list">{red_rows}</div></div>
-    </section>
-
-    <section id="blue" class="section">
-      <div class="panel"><h2>蓝球出现频率</h2><div class="bar-list">{blue_rows}</div></div>
-    </section>
-
-    <section id="trend" class="section">
-      <div class="panel"><h2>近100期红球和值走势</h2>{trend_svg}</div>
-      <div class="panel"><h2>全历史和值分布</h2>{sum_rows}</div>
-    </section>
-
-    <section id="recommend" class="section">
-      <div class="recommend">
-        <div class="rec-card"><strong>红球高频号码</strong><p>{hot_red_text}</p></div>
-        <div class="rec-card"><strong>红球低频号码</strong><p>{cold_red_text}</p></div>
-        <div class="rec-card"><strong>蓝球高频号码</strong><p>{hot_blue_text}</p></div>
-        <div class="rec-card"><strong>蓝球低频号码</strong><p>{cold_blue_text}</p></div>
-      </div>
-      <div class="panel"><h2>高频连号组合</h2><div class="pair-grid">{pair_cards}</div></div>
-      <div class="panel">
-        <h2>使用建议</h2>
-        <p class="note">选号参考只用于整理历史分布：可关注红球三区均衡、奇偶接近 3:3 或 4:2，和值尽量落在历史密集区间。彩票是随机事件，请理性参与。</p>
-      </div>
-    </section>
-
-    <section class="panel disclaimer" aria-label="免责声明">
-      <h2>数据来源与免责声明</h2>
-      <p class="note">{html.escape(disclaimer)}</p>
-    </section>
-  </main>
+    </main>
+    <div class="footer">本页面不销售彩票，不提供代购服务。开奖号码、奖级和兑奖规则以官方公告为准。</div>
+  </div>
 
   <script>
-    const APP_DATA = {data_json};
-    const body = document.getElementById('historyBody');
-    const note = document.getElementById('historyNote');
-    const yearSelect = document.getElementById('yearSelect');
-    const issueInput = document.getElementById('issueInput');
-    const checkIssueSelect = document.getElementById('checkIssueSelect');
-    const singleTicketInput = document.getElementById('singleTicketInput');
-    const batchTicketInput = document.getElementById('batchTicketInput');
-    const checkResults = document.getElementById('checkResults');
-    const drawInfo = document.getElementById('drawInfo');
-    const exampleTickets = [
-      '01 02 03 04 05 06 + 07',
-      '08 09 10 11 12 13 + 14',
-      '06 09 13 17 24 28 + 15'
-    ];
+    const DATA = {data_json};
+    let currentLottery = "ssq";
+    let lastBatchRows = [];
 
-    function redBalls(red) {{
-      return red.split(',').map(value => `<span class="red-ball">${{value}}</span>`).join('');
+    const parseNums = (value) => (value || "").replace(/，/g, " ").replace(/,/g, " ").trim().split(/\\s+/).filter(Boolean).map(Number);
+    const fmt = (value) => String(value).padStart(2, "0");
+    const currentData = () => DATA.lotteries[currentLottery];
+    const latestDraw = () => currentData().records[currentData().records.length - 1];
+
+    function groupsFromDraw(draw) {{
+      if (!draw) return [[], []];
+      if (currentLottery === "ssq") return [parseNums(draw.Red), parseNums(draw.Blue)];
+      if (currentLottery === "dlt") return [parseNums(draw.Front), parseNums(draw.Back)];
+      if (currentLottery === "qlc") return [parseNums(draw.Main), parseNums(draw.Special)];
+      return [parseNums(draw.Digit)];
     }}
 
-    function redBallsWithHits(red, hitSet) {{
-      return red.split(',').map(value => {{
-        const cls = hitSet && hitSet.has(Number(value)) ? 'red-ball hit-red' : 'red-ball';
-        return `<span class="${{cls}}">${{value}}</span>`;
-      }}).join('');
+    function checkSsq(redHits, blueHits) {{
+      if (redHits === 6 && blueHits === 1) return "一等奖";
+      if (redHits === 6 && blueHits === 0) return "二等奖";
+      if (redHits === 5 && blueHits === 1) return "三等奖";
+      if (redHits === 5 || (redHits === 4 && blueHits === 1)) return "四等奖";
+      if ((redHits === 4 && blueHits === 0) || (redHits === 3 && blueHits === 1)) return "五等奖";
+      if (blueHits === 1) return "六等奖";
+      return "未中奖";
     }}
 
-    function blueBallWithHit(value, isHit) {{
-      return `<span class="${{isHit ? 'blue-ball hit-blue' : 'blue-ball'}}">${{value}}</span>`;
+    function checkDlt(frontHits, backHits) {{
+      if (frontHits === 5 && backHits === 2) return "一等奖";
+      if (frontHits === 5 && backHits === 1) return "二等奖";
+      if (frontHits === 5 && backHits === 0) return "三等奖";
+      if (frontHits === 4 && backHits === 2) return "四等奖";
+      if (frontHits === 4 && backHits === 1) return "五等奖";
+      if (frontHits === 3 && backHits === 2) return "六等奖";
+      if (frontHits === 4 && backHits === 0) return "七等奖";
+      if ((frontHits === 3 && backHits === 1) || (frontHits === 2 && backHits === 2)) return "八等奖";
+      if ((frontHits === 3 && backHits === 0) || (frontHits === 2 && backHits === 1) || (frontHits === 1 && backHits === 2) || (frontHits === 0 && backHits === 2)) return "九等奖";
+      return "未中奖";
     }}
 
-    function rowHtml(item) {{
-      return `<tr><td>${{item.Issue}}</td><td>${{item.Date}}</td><td class="balls-cell">${{redBalls(item.Red)}}</td><td><span class="blue-ball">${{item.Blue}}</span></td><td>${{item.RedSum}}</td></tr>`;
+    function checkQlc(mainHits, specialHits) {{
+      if (mainHits === 7 && specialHits === 1) return "一等奖";
+      if (mainHits === 7 && specialHits === 0) return "二等奖";
+      if (mainHits === 6 && specialHits === 1) return "三等奖";
+      if (mainHits === 6 && specialHits === 0) return "四等奖";
+      if (mainHits === 5 && specialHits === 1) return "五等奖";
+      if ((mainHits === 5 && specialHits === 0) || (mainHits === 4 && specialHits === 1)) return "六等奖";
+      if (mainHits === 4 && specialHits === 0) return "七等奖";
+      return "未中奖";
     }}
 
-    function renderRows(items, message) {{
-      body.innerHTML = items.map(rowHtml).join('');
-      note.textContent = message;
+    function checkDigits(drawMain, ticketMain) {{
+      const exact = drawMain.length === ticketMain.length && drawMain.every((value, index) => value === ticketMain[index]);
+      if (exact) return currentLottery === "fc3d" || currentLottery === "pl3" ? "直选命中" : "命中开奖号码";
+      if ((currentLottery === "fc3d" || currentLottery === "pl3") && [...drawMain].sort().join(",") === [...ticketMain].sort().join(",")) return "组选参考命中";
+      return "未中奖";
     }}
 
-    function parseTicket(text) {{
-      const nums = (text.match(/\\d{{1,2}}/g) || []).map(value => Number(value));
-      if (nums.length < 7) {{
-        return {{ error: '至少需要 6 个红球和 1 个蓝球' }};
+    function checkTicket(mainNums, specialNums) {{
+      const draw = latestDraw();
+      if (!draw) return {{ level: "暂无开奖数据", mainHits: 0, specialHits: 0 }};
+      const [drawMain, drawSpecial] = groupsFromDraw(draw);
+      const areas = currentData().areas;
+      if (areas.length === 1) {{
+        const level = checkDigits(drawMain, mainNums);
+        const orderedHits = mainNums.filter((value, index) => drawMain[index] === value).length;
+        return {{ level, mainHits: orderedHits, specialHits: 0 }};
       }}
-      const reds = nums.slice(0, 6);
-      const blue = nums[6];
-      const uniqueReds = new Set(reds);
-      if (uniqueReds.size !== 6) {{
-        return {{ error: '红球不能重复' }};
+      const mainHits = mainNums.filter(value => drawMain.includes(value)).length;
+      const specialHits = specialNums.filter(value => drawSpecial.includes(value)).length;
+      let level = "未中奖";
+      if (currentLottery === "ssq") level = checkSsq(mainHits, specialHits);
+      else if (currentLottery === "dlt") level = checkDlt(mainHits, specialHits);
+      else if (currentLottery === "qlc") level = checkQlc(mainHits, specialHits);
+      return {{ level, mainHits, specialHits }};
+    }}
+
+    function setLottery(lotteryId) {{
+      currentLottery = lotteryId;
+      const data = currentData();
+      document.getElementById("currentLotteryLabel").textContent = data.shortName;
+      document.querySelectorAll(".lottery-card").forEach(card => card.classList.toggle("active", card.dataset.lottery === lotteryId));
+      document.querySelectorAll("[data-lottery-panel]").forEach(panel => panel.classList.toggle("active", panel.dataset.lotteryPanel === lotteryId));
+      document.getElementById("checkResult").textContent = `当前彩种：${{data.shortName}}。请输入号码后核验。`;
+      document.getElementById("mainNumbers").value = "";
+      document.getElementById("specialNumbers").value = "";
+      document.getElementById("batchNumbers").value = "";
+      lastBatchRows = [];
+    }}
+
+    function setSection(sectionId) {{
+      document.querySelectorAll(".tab").forEach(tab => tab.classList.toggle("active", tab.dataset.section === sectionId));
+      document.querySelectorAll(".section").forEach(section => section.classList.toggle("active", section.id === sectionId));
+    }}
+
+    function validateInput(mainNums, specialNums) {{
+      const areas = currentData().areas;
+      const specialArea = areas[1];
+      if (mainNums.length !== areas[0].count || (specialArea && specialNums.length !== specialArea.count) || (!specialArea && specialNums.length !== 0)) {{
+        return specialArea
+          ? `号码数量不对：${{currentData().shortName}}需要${{areas[0].count}}个${{areas[0].label}}、${{specialArea.count}}个${{specialArea.label}}。`
+          : `号码数量不对：${{currentData().shortName}}需要${{areas[0].count}}个${{areas[0].label}}，二区请留空。`;
       }}
-      if (reds.some(value => value < 1 || value > 33)) {{
-        return {{ error: '红球范围应为 01-33' }};
+      if (areas[0].unique && new Set(mainNums).size !== mainNums.length) return "一区号码不能重复。";
+      if (specialArea && specialArea.unique && new Set(specialNums).size !== specialNums.length) return "二区号码不能重复。";
+      if (mainNums.some(value => value < areas[0].min_number || value > areas[0].max_number)) return `${{areas[0].label}}超出范围。`;
+      if (specialArea && specialNums.some(value => value < specialArea.min_number || value > specialArea.max_number)) return `${{specialArea.label}}超出范围。`;
+      return "";
+    }}
+
+    function runSingleCheck() {{
+      const mainNums = parseNums(document.getElementById("mainNumbers").value);
+      const specialNums = parseNums(document.getElementById("specialNumbers").value);
+      const error = validateInput(mainNums, specialNums);
+      if (error) {{
+        document.getElementById("checkResult").textContent = error;
+        return;
       }}
-      if (blue < 1 || blue > 16) {{
-        return {{ error: '蓝球范围应为 01-16' }};
-      }}
-      return {{ reds: reds.sort((a, b) => a - b), blue }};
+      const result = checkTicket(mainNums, specialNums);
+      const latest = latestDraw();
+      const specialText = currentData().areas.length > 1 ? `，二区命中 ${{result.specialHits}} 个` : "";
+      document.getElementById("checkResult").textContent = `${{currentData().shortName}} ${{latest.Issue}}期：${{result.level}}\\n一区/开奖号码命中 ${{result.mainHits}} 个${{specialText}}。\\n提示：核验结果仅供参考，最终以官方兑奖规则为准。`;
     }}
 
-    function prizeName(redHits, blueHit) {{
-      if (redHits === 6 && blueHit) return '一等奖';
-      if (redHits === 6) return '二等奖';
-      if (redHits === 5 && blueHit) return '三等奖';
-      if (redHits === 5 || (redHits === 4 && blueHit)) return '四等奖';
-      if (redHits === 4 || (redHits === 3 && blueHit)) return '五等奖';
-      if (blueHit) return '六等奖';
-      return '未中奖';
+    function parseBatchLine(line) {{
+      const parts = line.split("+");
+      if (parts.length === 2) return [parseNums(parts[0]), parseNums(parts[1])];
+      const nums = parseNums(line);
+      const mainCount = currentData().areas[0].count;
+      return [nums.slice(0, mainCount), nums.slice(mainCount)];
     }}
 
-    function evaluateTicket(ticket, draw) {{
-      const drawReds = draw.Red.split(',').map(value => Number(value));
-      const drawRedSet = new Set(drawReds);
-      const hitReds = ticket.reds.filter(value => drawRedSet.has(value));
-      const blueHit = ticket.blue === Number(draw.Blue);
-      const prize = prizeName(hitReds.length, blueHit);
-      return {{ drawReds, hitReds, blueHit, prize }};
-    }}
-
-    function ticketBalls(ticket, result) {{
-      const hitSet = new Set(result.hitReds);
-      const reds = ticket.reds.map(value => {{
-        const valueText = String(value).padStart(2, '0');
-        const cls = hitSet.has(value) ? 'red-ball hit-red' : 'red-ball';
-        return `<span class="${{cls}}">${{valueText}}</span>`;
-      }}).join('');
-      return reds + blueBallWithHit(String(ticket.blue).padStart(2, '0'), result.blueHit);
-    }}
-
-    function renderCheckResult(rawText, index) {{
-      const draw = APP_DATA.records.find(item => item.Issue === checkIssueSelect.value) || APP_DATA.records[APP_DATA.records.length - 1];
-      const ticket = parseTicket(rawText);
-      if (ticket.error) {{
-        return `<div class="result-card"><div class="result-head"><span>第 ${{index}} 注</span><span class="prize miss">${{ticket.error}}</span></div><div class="note">${{rawText || '空行'}}</div></div>`;
-      }}
-      const result = evaluateTicket(ticket, draw);
-      const prizeClass = result.prize === '未中奖' ? 'prize miss' : 'prize';
-      return `<div class="result-card">
-        <div class="result-head"><span>第 ${{index}} 注 · 命中红球 ${{result.hitReds.length}} 个 / 蓝球 ${{result.blueHit ? '命中' : '未中'}}</span><span class="${{prizeClass}}">${{result.prize}}</span></div>
-        <div class="latest-row">${{ticketBalls(ticket, result)}}</div>
-      </div>`;
-    }}
-
-    function updateDrawInfo() {{
-      const draw = APP_DATA.records.find(item => item.Issue === checkIssueSelect.value) || APP_DATA.records[APP_DATA.records.length - 1];
-      const drawHitSet = new Set(draw.Red.split(',').map(value => Number(value)));
-      drawInfo.innerHTML = `当前核验：${{draw.Issue}}期 · ${{draw.Date}}<div class="latest-row" style="margin-top:8px;">${{redBallsWithHits(draw.Red, drawHitSet)}}${{blueBallWithHit(draw.Blue, true)}}</div>`;
-    }}
-
-    function checkSingle() {{
-      const value = singleTicketInput.value.trim();
-      checkResults.innerHTML = renderCheckResult(value, 1);
-    }}
-
-    function checkBatch() {{
-      const lines = batchTicketInput.value.split(/\\r?\\n/).map(line => line.trim()).filter(Boolean);
+    function runBatchCheck() {{
+      const lines = document.getElementById("batchNumbers").value.split(/\\n+/).map(line => line.trim()).filter(Boolean);
       if (!lines.length) {{
-        checkResults.innerHTML = '<div class="result-card"><span class="prize miss">请先粘贴号码</span></div>';
+        document.getElementById("checkResult").textContent = "请先粘贴要批量核验的号码。";
         return;
       }}
-      checkResults.innerHTML = lines.map((line, index) => renderCheckResult(line, index + 1)).join('');
-    }}
-
-    function fillExampleTickets() {{
-      singleTicketInput.value = exampleTickets[0];
-      batchTicketInput.value = exampleTickets.join('\\n');
-      checkBatch();
-    }}
-
-    function clearCheckResults() {{
-      singleTicketInput.value = '';
-      batchTicketInput.value = '';
-      checkResults.innerHTML = '';
-      updateDrawInfo();
-    }}
-
-    const years = Array.from(new Set(APP_DATA.records.map(item => item.Date.slice(0, 4)))).reverse();
-    yearSelect.innerHTML = '<option value="">选择年份</option>' + years.map(year => `<option value="${{year}}">${{year}}年</option>`).join('');
-    checkIssueSelect.innerHTML = APP_DATA.records.slice().reverse().map(item => `<option value="${{item.Issue}}">${{item.Issue}}期 · ${{item.Date}}</option>`).join('');
-    checkIssueSelect.value = APP_DATA.records[APP_DATA.records.length - 1].Issue;
-    updateDrawInfo();
-
-    document.querySelectorAll('.tab').forEach(tab => {{
-      tab.addEventListener('click', () => {{
-        document.querySelectorAll('.tab').forEach(item => item.classList.remove('active'));
-        document.querySelectorAll('.section').forEach(item => item.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById(tab.dataset.tab).classList.add('active');
+      lastBatchRows = [];
+      const output = lines.map((line, index) => {{
+        const [mainNums, specialNums] = parseBatchLine(line);
+        const error = validateInput(mainNums, specialNums);
+        if (error) {{
+          lastBatchRows.push([index + 1, line, "格式错误", error]);
+          return `${{index + 1}}. 格式错误：${{error}}`;
+        }}
+        const result = checkTicket(mainNums, specialNums);
+        const hitText = currentData().areas.length > 1 ? `一区${{result.mainHits}} 二区${{result.specialHits}}` : `按位命中${{result.mainHits}}`;
+        lastBatchRows.push([index + 1, line, result.level, hitText]);
+        return `${{index + 1}}. ${{result.level}}（${{hitText}}）`;
       }});
-    }});
+      document.getElementById("checkResult").textContent = output.join("\\n");
+    }}
 
-    yearSelect.addEventListener('change', () => {{
-      issueInput.value = '';
-      const year = yearSelect.value;
-      const rows = year ? APP_DATA.records.filter(item => item.Date.startsWith(year)) : APP_DATA.records.slice(-30).reverse();
-      renderRows(rows.slice().reverse(), year ? `${{year}}年共 ${{rows.length}} 期` : '当前显示最近30期。可按年份或期号查询。');
-    }});
+    function exportCsv() {{
+      if (!lastBatchRows.length) runBatchCheck();
+      if (!lastBatchRows.length) return;
+      const csv = "序号,号码,结果,命中\\n" + lastBatchRows.map(row => row.map(cell => `"${{String(cell).replace(/"/g, '""')}}"`).join(",")).join("\\n");
+      const blob = new Blob(["\\ufeff" + csv], {{ type: "text/csv;charset=utf-8" }});
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `${{currentData().shortName}}批量核验.csv`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }}
 
-    issueInput.addEventListener('input', () => {{
-      yearSelect.value = '';
-      const keyword = issueInput.value.trim();
-      if (!keyword) {{
-        renderRows(APP_DATA.records.slice(-30).reverse(), '当前显示最近30期。可按年份或期号查询。');
-        return;
-      }}
-      const rows = APP_DATA.records.filter(item => item.Issue.includes(keyword));
-      renderRows(rows.slice().reverse(), `找到 ${{rows.length}} 条匹配期号`);
-    }});
+    function fillExample() {{
+      const draw = latestDraw();
+      const [main, special] = groupsFromDraw(draw);
+      document.getElementById("mainNumbers").value = main.map(fmt).join(" ");
+      document.getElementById("specialNumbers").value = (special || []).map(fmt).join(" ");
+      document.getElementById("batchNumbers").value = special && special.length ? `${{main.map(fmt).join(" ")}} + ${{special.map(fmt).join(" ")}}` : main.map(fmt).join(" ");
+      document.getElementById("checkResult").textContent = "已填入最新开奖号作为示例。";
+    }}
 
-    document.getElementById('resetBtn').addEventListener('click', () => {{
-      yearSelect.value = '';
-      issueInput.value = '';
-      renderRows(APP_DATA.records.slice(-30).reverse(), '当前显示最近30期。可按年份或期号查询。');
-    }});
+    function runSearch() {{
+      const keyword = document.getElementById("globalSearch").value.trim().toLowerCase();
+      setSection("history");
+      document.querySelectorAll(".history-body.active tr").forEach(row => {{
+        const haystack = (row.dataset.search || row.textContent).toLowerCase();
+        row.style.display = !keyword || haystack.includes(keyword) ? "" : "none";
+      }});
+    }}
 
-    checkIssueSelect.addEventListener('change', () => {{
-      updateDrawInfo();
-      if (checkResults.innerHTML.trim()) {{
-        if (batchTicketInput.value.trim()) checkBatch();
-        else if (singleTicketInput.value.trim()) checkSingle();
-      }}
+    document.querySelectorAll(".lottery-card").forEach(card => card.addEventListener("click", () => setLottery(card.dataset.lottery)));
+    document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => setSection(tab.dataset.section)));
+    document.getElementById("checkSingle").addEventListener("click", runSingleCheck);
+    document.getElementById("checkBatch").addEventListener("click", runBatchCheck);
+    document.getElementById("exportCsv").addEventListener("click", exportCsv);
+    document.getElementById("fillExample").addEventListener("click", fillExample);
+    document.getElementById("clearResult").addEventListener("click", () => {{
+      document.getElementById("mainNumbers").value = "";
+      document.getElementById("specialNumbers").value = "";
+      document.getElementById("batchNumbers").value = "";
+      document.getElementById("checkResult").textContent = "已清空。";
+      lastBatchRows = [];
     }});
-    document.getElementById('checkSingleBtn').addEventListener('click', checkSingle);
-    document.getElementById('checkBatchBtn').addEventListener('click', checkBatch);
-    document.getElementById('fillExampleBtn').addEventListener('click', fillExampleTickets);
-    document.getElementById('clearCheckBtn').addEventListener('click', clearCheckResults);
-    singleTicketInput.addEventListener('keydown', event => {{
-      if (event.key === 'Enter') checkSingle();
-    }});
+    document.getElementById("searchBtn").addEventListener("click", runSearch);
+    document.getElementById("globalSearch").addEventListener("keydown", event => {{ if (event.key === "Enter") runSearch(); }});
   </script>
 </body>
 </html>
 """
-    with open(OUT_FILE, "w", encoding="utf-8") as file:
-        file.write(html_text)
-    print(f"Built {OUT_FILE} with {total} records.")
+
+
+def main() -> None:
+    html_text = build_page()
+    OUT_FILE.write_text(html_text, encoding="utf-8")
+    print(f"Dashboard generated: {OUT_FILE}")
 
 
 if __name__ == "__main__":

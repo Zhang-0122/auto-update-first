@@ -31,13 +31,21 @@ def main() -> None:
     if response.status_code != 200:
         fail(f"expected HTTP 200, got {response.status_code}")
 
-    html = response.text
+    response.encoding = "utf-8"
+    page = response.text
     checks = {
-        "not password protected": "Password Protection" not in html,
-        "has sync status": "已同步到" in html,
-        "has official source": "官方来源" in html,
-        "has disclaimer": "数据来源与免责声明" in html and "不构成购彩建议" in html,
-        "has lottery title": "双色球开奖查询与统计参考" in html,
+        "not password protected": "Password Protection" not in page,
+        "has sync status": "已同步到" in page,
+        "has official source": "官方来源" in page and "中国福彩网" in page and "中国体彩网" in page,
+        "has disclaimer": "权威免责声明" in page and "不销售彩票" in page and "不提供代购服务" in page,
+        "has lottery title": "彩票开奖数据中心" in page,
+        "has ssq": "双色球" in page,
+        "has dlt": "大乐透" in page,
+        "has fc3d": "福彩3D" in page,
+        "has pl3": "排列3" in page,
+        "has pl5": "排列5" in page,
+        "has qxc": "七星彩" in page,
+        "has qlc": "七乐彩" in page,
     }
     failed = [name for name, ok in checks.items() if not ok]
     for name, ok in checks.items():
@@ -50,4 +58,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     sys.exit(main())
-
