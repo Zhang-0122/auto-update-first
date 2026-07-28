@@ -74,9 +74,14 @@ def fetch_500(start, end):
 def fetch_cwl():
     print("[2/3] cwl.gov.cn ...", end=" ")
     url = "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice?name=ssq&issueCount=300"
-    resp = requests.get(url, headers={"User-Agent": UA, "Referer": "https://www.cwl.gov.cn/"}, timeout=TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = requests.get(url, headers={"User-Agent": UA, "Referer": "https://www.cwl.gov.cn/"}, timeout=TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        print(f"FAIL {exc}")
+        log(f"cwl.gov.cn 300期接口不可用: {exc}")
+        return []
     recs = []
     if data.get("state") == 0:
         for item in data["result"]:
@@ -85,7 +90,9 @@ def fetch_cwl():
                          "Date": item["date"].split("(")[0],
                          "Red": normalize_red(item["red"]), "Blue": normalize_blue(item["blue"])})
     else:
-        raise RuntimeError(f"cwl.gov.cn 返回异常: {data.get('message', '未知错误')}")
+        print(f"FAIL {data.get('message', '未知错误')}")
+        log(f"cwl.gov.cn 300期接口返回异常: {data.get('message', '未知错误')}")
+        return []
     print(f"OK {len(recs)} records")
     return recs
 
@@ -93,11 +100,18 @@ def fetch_cwl():
 def fetch_cwl_latest():
     print("[0/3] cwl.gov.cn latest ...", end=" ")
     url = "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice?name=ssq&issueCount=1"
-    resp = requests.get(url, headers={"User-Agent": UA, "Referer": "https://www.cwl.gov.cn/"}, timeout=TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = requests.get(url, headers={"User-Agent": UA, "Referer": "https://www.cwl.gov.cn/"}, timeout=TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        print(f"FAIL {exc}")
+        log(f"cwl.gov.cn latest 接口不可用: {exc}")
+        return None
     if data.get("state") != 0 or not data.get("result"):
-        raise RuntimeError(f"cwl.gov.cn 最新开奖结果查询异常: {data.get('message', '未知错误')}")
+        print(f"FAIL {data.get('message', '未知错误')}")
+        log(f"cwl.gov.cn latest 返回异常: {data.get('message', '未知错误')}")
+        return None
     item = data["result"][0]
     latest = {
         "Issue": item["code"][-5:],
@@ -130,29 +144,30 @@ def main():
     print("  双色球数据采集 v2.0 (Python)")
     print("=" * 50)
     try:
-        latest_official = fetch_cwl_latest()
-        existing = load_existing()
-        if existing:
-            current_latest = existing[-1]
-            if (
-                current_latest.get("Issue") == latest_official["Issue"]
-                and current_latest.get("Date") == latest_official["Date"]
-                and current_latest.get("Red") == latest_official["Red"]
-                and current_latest.get("Blue") == latest_official["Blue"]
-            ):
-                print("[1/3] 官方最新开奖未变化，跳过同步。")
-                print(f"  当前已同步到: {current_latest['Issue']}期 {current_latest['Date']}")
-                log(f"无需同步: 当前已是最新 {current_latest['Issue']}期 {current_latest['Date']}")
-                return
         current_year = datetime.now().year % 100
         end_issue = f"{current_year:02d}200"
         a = fetch_500("03001", end_issue)
         time.sleep(0.5)
         b = fetch_cwl()
+        existing = load_existing()
         # 以期号为键去重
         seen = {}
         for r in a + b:
             seen[r["Issue"]] = r
+        merged = sorted(seen.values(), key=lambda x: x["Date"])
+        if existing:
+            current_latest = existing[-1]
+            merged_latest = merged[-1]
+            if (
+                current_latest.get("Issue") == merged_latest["Issue"]
+                and current_latest.get("Date") == merged_latest["Date"]
+                and current_latest.get("Red") == merged_latest["Red"]
+                and current_latest.get("Blue") == merged_latest["Blue"]
+            ):
+                print("[3/3] 官方最新开奖未变化，跳过同步。")
+                print(f"  当前已同步到: {current_latest['Issue']}期 {current_latest['Date']}")
+                log(f"无需同步: 当前已是最新 {current_latest['Issue']}期 {current_latest['Date']}")
+                return
         merged = save_records(seen.values())
         print(f"[3/3] 合并保存: {len(merged)} records -> {OUT}")
         print("=" * 50)
