@@ -42,7 +42,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add double/ssq_data.json double/dlt_data.json double/fc3d_data.json double/pl3_data.json double/pl5_data.json double/qxc_data.json double/qlc_data.json double/ssq_analyzer.html release/index.html
+          git add double/ssq_data.json double/dlt_data.json double/fc3d_data.json double/pl3_data.json double/pl5_data.json double/qxc_data.json double/qlc_data.json double/*.html release/*.html
           if git diff --cached --quiet; then
             echo "No lottery data changes to commit."
           else
