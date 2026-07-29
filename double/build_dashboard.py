@@ -267,9 +267,15 @@ def render_summary(config: LotteryConfig, records: list[dict[str, str]]) -> str:
 def render_checker(config: LotteryConfig, lottery_id: str) -> str:
     main = config.areas[0]
     special = config.areas[1] if len(config.areas) > 1 else None
+    special_text = f"第二栏填写{special.label}。" if special else "本彩种没有第二栏，留空即可。"
     return f"""
     <section class="panel" id="checker">
       <div class="panel-title"><h2>中奖核验</h2><span class="muted">以官方规则为准</span></div>
+      <div class="checker-help">
+        <strong>中奖核验是做什么的？</strong>
+        <p class="muted">它是一个“开奖后对号工具”：你把自己手里的号码填进来，页面会按本彩种规则和最新一期开奖结果比对，显示命中数量与参考奖级，方便你快速核对。</p>
+        <p class="muted">填写方法：第一栏填写{html.escape(main.label)}，{html.escape(special_text)}如果有多注号码，可以粘贴到批量核验框里，一行一注。核验结果仅供参考，最终以官方公告和兑奖规则为准。</p>
+      </div>
       <div class="form-grid">
         <label>{html.escape(main.label)}<input id="mainNumbers" placeholder="{main.count}个号码，范围{main.min_number}-{main.max_number}"></label>
         <label>{html.escape(special.label if special else "二区号码")}<input id="specialNumbers" placeholder="{f'{special.count}个号码，范围{special.min_number}-{special.max_number}' if special else '数字彩留空'}"></label>
@@ -285,7 +291,7 @@ def render_checker(config: LotteryConfig, lottery_id: str) -> str:
         <button class="btn" id="checkBatch" type="button">批量核验</button>
         <button class="btn" id="exportCsv" type="button">导出 CSV</button>
       </div>
-      <div class="result" id="checkResult">请输入号码后核验。</div>
+      <div class="result" id="checkResult">这里用于开奖后核对号码：输入你持有的号码，再点击“核验当前号码”或“批量核验”。</div>
     </section>
     """
 
@@ -316,7 +322,7 @@ def render_stats(config: LotteryConfig, lottery_id: str, records: list[dict[str,
             </div>
             """
         )
-    return f'<section class="panel" id="stats"><div class="panel-title"><h2>号码统计</h2><span class="muted">热冷号用颜色和文字同时表达</span></div><div class="freq-grid">{"".join(blocks)}</div></section>'
+    return f'<section class="panel" id="stats"><div class="panel-title"><h2>号码统计</h2><span class="muted">日期切换功能</span></div><div class="freq-grid">{"".join(blocks)}</div></section>'
 
 
 def render_trend(config: LotteryConfig, lottery_id: str, records: list[dict[str, str]]) -> str:
@@ -360,16 +366,25 @@ def render_trend(config: LotteryConfig, lottery_id: str, records: list[dict[str,
 
 def render_history(config: LotteryConfig, lottery_id: str, records: list[dict[str, str]]) -> str:
     rows = []
-    for record in reversed(records[-80:]):
+    years = sorted({record["Date"][:4] for record in records}, reverse=True)
+    latest_year = years[0] if years else ""
+    options = '<option value="all">全部年份</option>' + "".join(f'<option value="{year}">{year}年</option>' for year in years)
+    for record in reversed(records):
         groups = record_groups(lottery_id, record)
         first = group_balls_html(groups[0], config.areas[0].color)
         second = group_balls_html(groups[1], config.areas[1].color) if len(groups) > 1 else '<span class="muted">无</span>'
         rows.append(
-            f'<tr><td>{html.escape(record["Issue"])}</td><td>{html.escape(record["Date"])}</td><td>{first}</td><td>{second}</td></tr>'
+            f'<tr data-year="{html.escape(record["Date"][:4])}"><td>{html.escape(record["Issue"])}</td><td>{html.escape(record["Date"])}</td><td>{first}</td><td>{second}</td></tr>'
         )
     return f"""
     <section class="panel" id="history">
-      <div class="panel-title"><h2>历史记录</h2><span class="muted">最近80期</span></div>
+      <div class="panel-title"><h2>历史记录</h2><span class="muted">完整数据：{html.escape(years[-1] if years else "")}年至{html.escape(latest_year)}年</span></div>
+      <div class="year-tools">
+        <label>按年份查看：
+          <select id="yearSelect">{options}</select>
+        </label>
+        <span class="muted" id="yearSummary">完整数据共 {len(records)} 期，可切换到某一年单独查看。</span>
+      </div>
       <div class="table-wrap"><table><thead><tr><th>期号</th><th>日期</th><th>一区/开奖号码</th><th>二区/特别号</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
     </section>
     """
@@ -526,6 +541,24 @@ def detail_script() -> str:
       document.getElementById("checkResult").textContent = "已清空。";
       lastBatchRows = [];
     });
+    function applyYearFilter() {
+      const select = document.getElementById("yearSelect");
+      const summary = document.getElementById("yearSummary");
+      if (!select) return;
+      const year = select.value;
+      let count = 0;
+      document.querySelectorAll("#history tbody tr").forEach(row => {
+        const visible = year === "all" || row.dataset.year === year;
+        row.style.display = visible ? "" : "none";
+        if (visible) count += 1;
+      });
+      if (summary) summary.textContent = year === "all" ? `当前显示全部年份，共 ${count} 期` : `当前显示 ${year} 年，共 ${count} 期`;
+    }
+    const yearSelect = document.getElementById("yearSelect");
+    if (yearSelect) {
+      yearSelect.addEventListener("change", applyYearFilter);
+      applyYearFilter();
+    }
     """
 
 
@@ -547,7 +580,7 @@ def page_shell(title: str, body: str) -> str:
 
 STYLE = r"""
 :root{--page:#f5f7fb;--card:#fff;--ink:#1f2937;--muted:#667085;--line:#e4e7ec;--warm:#f26b35;--warm-mid:#ff9a4d;--warm-soft:#ffd5c2;--cool:#2f8fe8;--cool-mid:#6ab5ff;--cool-soft:#d9ecff;--neutral:#d9e0ea;--green:#14835b;--shadow:0 20px 48px rgba(31,41,55,.08)}
-*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC",Arial,sans-serif;line-height:1.6}a{color:inherit;text-decoration:none}button,input,textarea{font:inherit}.page{max-width:1240px;margin:0 auto;padding:24px}.home-hero{display:grid;grid-template-columns:1.05fr .95fr;gap:16px}.hero-main,.panel,.sync-panel{background:var(--card);border:1px solid var(--line);border-radius:26px;padding:20px;box-shadow:var(--shadow)}.hero-main{background:linear-gradient(135deg,#fff3ec,#eef6ff)}.hero-title,.panel-title,.detail-title,.lottery-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}h1{margin:0 0 8px;font-size:36px;letter-spacing:-.04em}h2,h3,p{margin:0}.muted,small{color:var(--muted)}.badge,.nav-pill{border:1px solid var(--line);border-radius:999px;padding:7px 12px;background:#f8fafc}.ok{color:var(--green);font-weight:700}.search-row{display:grid;grid-template-columns:1fr auto;gap:10px;margin-top:18px}input,textarea{width:100%;border:1px solid var(--line);border-radius:16px;padding:12px 14px;background:#fff;color:var(--ink)}textarea{min-height:112px;resize:vertical}.btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:999px;padding:10px 16px;cursor:pointer}.btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}.status-list{display:grid;gap:10px;margin-top:12px}.status-row{display:flex;justify-content:space-between;gap:14px;border-bottom:1px dashed var(--line);padding-bottom:9px}.status-row:last-child{border-bottom:0}.source-row{margin-top:10px}.lottery-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:12px;margin:18px 0}.lottery-card{min-height:164px;display:grid;gap:9px;text-align:left;border:1px solid var(--line);border-radius:22px;padding:14px;background:#fff;transition:.16s ease}.lottery-card:hover{transform:translateY(-2px);border-color:#98a2b3}.lottery-card strong{font-size:18px}.lottery-card small{white-space:nowrap}.lottery-meta{color:var(--muted);font-size:13px;border-top:1px dashed var(--line);padding-top:8px}.balls{display:flex;flex-wrap:wrap;gap:5px;align-items:center}.ball,.mini-ball{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;font-weight:700;font-variant-numeric:tabular-nums}.ball{width:32px;height:32px}.mini-ball{width:30px;height:30px}.warm{background:linear-gradient(145deg,var(--warm-mid),var(--warm));color:#fff8f2}.cool{background:linear-gradient(145deg,var(--cool-mid),var(--cool));color:#eef7ff}.neutral{background:linear-gradient(145deg,#eef1f6,var(--neutral));color:#344054}.notice{border:1px solid #f0d7ad;border-radius:20px;padding:16px;background:#fff8ed}.detail-hero{display:grid;gap:14px;margin-bottom:16px}.back-link{color:var(--muted)}.nav-row{display:flex;flex-wrap:wrap;gap:8px}.nav-pill.active{background:var(--ink);color:#fff;border-color:var(--ink)}.detail-layout{display:grid;grid-template-columns:300px 1fr;gap:16px;align-items:start}.left-panel,.right-panel{display:grid;gap:16px}.latest-balls{margin:12px 0}.quick-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.quick-grid a{border:1px solid var(--line);border-radius:14px;padding:10px;text-align:center;background:#fbfcff}.summary-grid,.feature-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.summary-card,.feature,.mini-panel{border:1px solid var(--line);border-radius:18px;padding:14px;background:#fbfcff}.summary-card strong{display:block;font-size:26px}.summary-card span{color:var(--muted)}.summary-text{margin-top:12px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.batch-label{display:block;margin-top:14px}.result{margin-top:12px;border:1px solid var(--line);border-radius:16px;padding:12px;background:#f8fafc;white-space:pre-wrap}.freq-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.freq-list{display:grid;gap:8px;margin-top:12px}.freq-row{display:grid;grid-template-columns:36px 1fr 58px 36px;gap:8px;align-items:center}.track{height:10px;border-radius:999px;background:#edf0f5;overflow:hidden}.fill{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--warm-soft),var(--warm))}.cool-fill{background:linear-gradient(90deg,var(--cool-soft),var(--cool))}.trend-svg{width:100%;height:auto;display:block}.grid-line{stroke:#e4e7ec;stroke-width:1}.axis{fill:#667085;font-size:12px}.trend-line{fill:none;stroke:var(--warm);stroke-width:3}.trend-dot{fill:var(--cool)}.avg-line{stroke:#98a2b3;stroke-dasharray:6 6}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--line);padding:10px 8px;text-align:left;vertical-align:middle}th{color:var(--muted)}
+*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC",Arial,sans-serif;line-height:1.6}a{color:inherit;text-decoration:none}button,input,textarea,select{font:inherit}.page{max-width:1240px;margin:0 auto;padding:24px}.home-hero{display:grid;grid-template-columns:1.05fr .95fr;gap:16px}.hero-main,.panel,.sync-panel{background:var(--card);border:1px solid var(--line);border-radius:26px;padding:20px;box-shadow:var(--shadow)}.hero-main{background:linear-gradient(135deg,#fff3ec,#eef6ff)}.hero-title,.panel-title,.detail-title,.lottery-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}h1{margin:0 0 8px;font-size:36px;letter-spacing:-.04em}h2,h3,p{margin:0}.muted,small{color:var(--muted)}.badge,.nav-pill{border:1px solid var(--line);border-radius:999px;padding:7px 12px;background:#f8fafc}.ok{color:var(--green);font-weight:700}.search-row{display:grid;grid-template-columns:1fr auto;gap:10px;margin-top:18px}input,textarea,select{width:100%;border:1px solid var(--line);border-radius:16px;padding:12px 14px;background:#fff;color:var(--ink)}textarea{min-height:112px;resize:vertical}.btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:999px;padding:10px 16px;cursor:pointer}.btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}.status-list{display:grid;gap:10px;margin-top:12px}.status-row{display:flex;justify-content:space-between;gap:14px;border-bottom:1px dashed var(--line);padding-bottom:9px}.status-row:last-child{border-bottom:0}.source-row{margin-top:10px}.lottery-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:12px;margin:18px 0}.lottery-card{min-height:164px;display:grid;gap:9px;text-align:left;border:1px solid var(--line);border-radius:22px;padding:14px;background:#fff;transition:.16s ease}.lottery-card:hover{transform:translateY(-2px);border-color:#98a2b3}.lottery-card strong{font-size:18px}.lottery-card small{white-space:nowrap}.lottery-meta{color:var(--muted);font-size:13px;border-top:1px dashed var(--line);padding-top:8px}.balls{display:flex;flex-wrap:wrap;gap:5px;align-items:center}.ball,.mini-ball{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;font-weight:700;font-variant-numeric:tabular-nums}.ball{width:32px;height:32px}.mini-ball{width:30px;height:30px}.warm{background:linear-gradient(145deg,var(--warm-mid),var(--warm));color:#fff8f2}.cool{background:linear-gradient(145deg,var(--cool-mid),var(--cool));color:#eef7ff}.neutral{background:linear-gradient(145deg,#eef1f6,var(--neutral));color:#344054}.notice{border:1px solid #f0d7ad;border-radius:20px;padding:16px;background:#fff8ed}.detail-hero{display:grid;gap:14px;margin-bottom:16px}.back-link{color:var(--muted)}.nav-row{display:flex;flex-wrap:wrap;gap:8px}.nav-pill.active{background:var(--ink);color:#fff;border-color:var(--ink)}.detail-layout{display:grid;grid-template-columns:300px 1fr;gap:16px;align-items:start}.left-panel,.right-panel{display:grid;gap:16px}.latest-balls{margin:12px 0}.quick-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.quick-grid a{border:1px solid var(--line);border-radius:14px;padding:10px;text-align:center;background:#fbfcff}.summary-grid,.feature-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.summary-card,.feature,.mini-panel{border:1px solid var(--line);border-radius:18px;padding:14px;background:#fbfcff}.summary-card strong{display:block;font-size:26px}.summary-card span{color:var(--muted)}.summary-text{margin-top:12px}.checker-help{border:1px solid var(--line);border-radius:18px;padding:14px;background:#fbfcff;margin-bottom:14px}.checker-help p{margin-top:6px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.batch-label{display:block;margin-top:14px}.result{margin-top:12px;border:1px solid var(--line);border-radius:16px;padding:12px;background:#f8fafc;white-space:pre-wrap}.freq-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.freq-list{display:grid;gap:8px;margin-top:12px}.freq-row{display:grid;grid-template-columns:36px 1fr 58px 36px;gap:8px;align-items:center}.track{height:10px;border-radius:999px;background:#edf0f5;overflow:hidden}.fill{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--warm-soft),var(--warm))}.cool-fill{background:linear-gradient(90deg,var(--cool-soft),var(--cool))}.trend-svg{width:100%;height:auto;display:block}.grid-line{stroke:#e4e7ec;stroke-width:1}.axis{fill:#667085;font-size:12px}.trend-line{fill:none;stroke:var(--warm);stroke-width:3}.trend-dot{fill:var(--cool)}.avg-line{stroke:#98a2b3;stroke-dasharray:6 6}.year-tools{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 12px}.year-tools label{display:flex;align-items:center;gap:8px}.year-tools select{width:auto;min-width:130px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--line);padding:10px 8px;text-align:left;vertical-align:middle}th{color:var(--muted)}
 @media(max-width:1100px){.home-hero,.detail-layout{grid-template-columns:1fr}.lottery-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:720px){.page{padding:14px}h1{font-size:28px}.lottery-grid,.summary-grid,.feature-grid,.freq-grid,.form-grid,.search-row{grid-template-columns:1fr}}
 """
 
